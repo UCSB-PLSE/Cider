@@ -1,5 +1,5 @@
 from lark import Lark
-import productions
+import typ as T
 
 type_grammar = """
     start: t
@@ -18,9 +18,9 @@ def parse(type_str):
     parse_tree = parser.parse(type_str)
     def f(t):
         if t.data == "int":
-            return productions.T_INT
+            return T.Int()
         elif t.data == "mapping":
-            return productions.T_MAP(f(t.children[1]))
+            return T.Map(f(t.children[1]))
     return f(parse_tree.children[0])
 
 
