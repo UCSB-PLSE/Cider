@@ -1,6 +1,7 @@
 import re
 import subprocess
 from typing import List
+import numpy as np
 
 import graph
 import parse_type
@@ -21,15 +22,16 @@ def get_vars(filename) -> List[Production]:
     for i in range(n):
         var = res[i]
         typ = parse_type.parse(res[n + i])
-        p = Production(typ, lambda var=var, typ=typ: Leaf(var, typ), var)
-        p_lst.append(p)
+        if typ:
+            p = Production(typ, lambda var=var, typ=typ: Leaf(var, typ), var)
+            p_lst.append(p)
     return p_lst
 
 
 def check(filename, inv):
     """Check if the invariant holds"""
     ret = subprocess.run(f"liquidsol-exe {filename} --task check --check-inv '{inv}'", shell=True, capture_output=True)
-    print(ret)
+    # print(ret)
     if ret.returncode != 0:
         return None
     ret = ret.stdout.decode("utf-8")
@@ -37,16 +39,9 @@ def check(filename, inv):
     soft_ok, soft = re.search("Soft: ([0-9]+) / ([0-9]+)", ret).groups()
     return list(map(int, [hard_ok, hard, soft_ok, soft]))
 
-def pretty(d, indent=0, post=lambda x: x, pre="  "):
-    for key, value in d.items():
-        print(pre * indent + str(key))
-        if isinstance(value, dict):
-            pretty(value, indent+1, post, pre)
-        else:
-            print(pre * (indent+1) + str(post(value)))
 
 class Environment:
-    def __init__(self, filename, state_size=10, maximum_expansions=50, start_type=T.Bool()):
+    def __init__(self, filename, state_size=10, maximum_expansions=10, start_type=T.Bool()):
         self.filename = filename
         self.maximum_expansions = maximum_expansions
         
@@ -56,6 +51,8 @@ class Environment:
         self.ps = Productions(self.p_lst)
     
         self._state_size = state_size
+        _, _, self.soft_baseline, self.soft = check(filename, "true")
+        print("Soft baseline: {}/{}".format(self.soft_baseline, self.soft))
         
         self.reset()
     
@@ -64,6 +61,8 @@ class Environment:
         self.ast: Node = self.start_node()
         self.encode()
         self.expand_count = 0
+        self.ps.print_accessible()
+        self.ps.print_ps()
         return self.state
     
     def encode(self):
@@ -77,13 +76,18 @@ class Environment:
     def state_size(self):
         return self._state_size
     
-    def step(self, action_i):
-        assert(not self.done)
-        assert(action_i < len(self.ps))
+    def get_mask(self):
         holes = self.ast.holes()
         legal = set().union(*[self.ps[hole] for hole in holes])
-        print(", ".join(map(repr, legal)))
-        mask = [p in legal for p in self.ps]
+        mask = np.array([p in legal for p in self.ps])
+        return mask
+    
+    def step(self, action_i):
+        assert(not self.done)
+        action_i = int(action_i)
+        assert(action_i < len(self.ps))
+
+        mask = self.get_mask()
 
         if not mask[action_i]:
             print("Invalid production:", self.ps[action_i].name)
@@ -105,9 +109,11 @@ class Environment:
                 self.encode()
                 self.expand_count += 1
 
+                print(self.ast)
+
                 if not self.ast.is_complete() and self.expand_count < self.maximum_expansions:
                     next_state = self.state
-                    reward = 0.01
+                    reward = -0.01
                     done = False
                 
                 else:
@@ -116,19 +122,22 @@ class Environment:
                     done = True
                     check_res = check(self.filename, str(self.ast))
                     if check_res is None or self.expand_count >= self.maximum_expansions: # syntax or semantic errors
-                        print("Unexpected error:", self.ast)
+                        print("Too many expansions:", self.ast)
                         reward = -1
                     else:
                         hard_ok, hard, soft_ok, soft = check_res
                         assert(hard > 0)
                         if hard_ok < hard: # hard constraint violated
-                            reward = -0.5
+                            reward = -1
                         else:
                             reward = 0
+                            soft_ok = max(0, soft_ok - self.soft_baseline)
+                            soft = max(0, soft - self.soft_baseline)
+
                             if soft > 0:
                                 reward += soft_ok / soft
-                            else:
-                                reward += 1
+                                if soft_ok == soft:
+                                    print("YAYYYYY!", self.ast)
         if done:
             self.done = True
         return next_state, reward, done, None
