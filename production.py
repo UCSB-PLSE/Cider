@@ -1,4 +1,4 @@
-from typing import Callable, Tuple, Final, TYPE_CHECKING
+from typing import Callable, Tuple, Set, Final, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tree import Node
@@ -21,6 +21,10 @@ class Production:
     
     def is_concrete(self):
         return self._left.is_concrete()
+    
+    def vocabulary(self) -> Set[str]:
+        r = self.right()
+        return {str(self.left)} | set(r.tokenize())
     
     @property
     def name(self) -> str:

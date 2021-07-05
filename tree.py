@@ -28,6 +28,15 @@ class Node(ABC):
     def __repr__(self):
         raise NotImplementedError
     
+    def tokenize(self) -> List[str]:
+        res: List[str] = []
+        self._tokenize(res)
+        return res
+    
+    @abstractmethod
+    def _tokenize(self, acc: List[str]):
+        raise NotImplementedError
+    
     @property
     def type(self) -> Type:
         return self._type
@@ -43,6 +52,10 @@ class Node(ABC):
     
     @abstractmethod
     def holes(self) -> Set[Type]:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def nonholes(self) -> Set[str]:
         raise NotImplementedError
 
     @abstractmethod
@@ -105,6 +118,12 @@ class Hole(Node):
     
     def holes(self) -> Set[Type]:
         return {self.type}
+    
+    def nonholes(self) -> Set[str]:
+        return set()
+    
+    def _tokenize(self, acc: List[str]):
+        acc.append(str(self.type))
 
 
 class NonHole(Node):
@@ -146,6 +165,19 @@ class NonHole(Node):
         for c in self._children:
             res |= c.holes()
         return res
+    
+    def nonholes(self) -> Set[str]:
+        res = {self.kind}
+        for c in self._children:
+            res |= c.nonholes()
+        return res
+    
+    def _tokenize(self, acc: List[str]):
+        acc.append("(")
+        acc.append(self.kind)
+        for c in self._children:
+            c._tokenize(acc)
+        acc.append(")")
 
 
 class Unary(NonHole):
@@ -154,6 +186,7 @@ class Unary(NonHole):
     
     def __str__(self):
         return "{op}({c})".format(op=self._kind, c=self._children[0])
+
 
 
 class Infix(NonHole):
@@ -169,8 +202,7 @@ class Leaf(NonHole):
         super().__init__(kind, typ, [])
     
     def __str__(self):
-        return self._kind
-
+        return self.kind
 
 
 if __name__ == '__main__':

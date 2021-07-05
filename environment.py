@@ -78,8 +78,8 @@ class Environment:
     
     def get_mask(self):
         holes = self.ast.holes()
-        legal = set().union(*[self.ps[hole] for hole in holes])
-        mask = np.array([p in legal for p in self.ps])
+        legal = set().union(*[self.ps.access(hole) for hole in holes])
+        mask = np.array([p in legal for _,p in self.ps])
         return mask
     
     def step(self, action_i):
@@ -90,12 +90,12 @@ class Environment:
         mask = self.get_mask()
 
         if not mask[action_i]:
-            print("Invalid production:", self.ps[action_i].name)
+            print("Invalid production:", self.ps.nth(action_i)[1].name)
             next_state = self.state
             reward = -1
             done = True
         else:
-            p = self.ps[action_i]
+            _,p = self.ps.nth(action_i)
             ast = self.ast._expand(p)
             # assert(ast)
             if ast is None:

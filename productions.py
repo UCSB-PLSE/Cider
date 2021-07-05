@@ -3,17 +3,15 @@ from collections.abc import Mapping
 from production import Production
 from typ import Type, Bool, Int, Map, Any
 from tree import Hole, Infix, Unary, Leaf
+from ordered_dict import OrderedDict, ORDERED_DICT
+from ordered_set import OrderedSet, ORDERED_SET
 
-class Productions(Mapping):
-    _d: Final[ Dict[str, Production] ]
-    _l: Final[ List[Production] ]
-    _i: Final[ Dict[Production, int] ]
+class Productions(ORDERED_DICT[str, Production]):
+    _d: OrderedDict[str, Production]
     _accessible: Final[ Dict[Type, Set[Production]] ]
     
     def __init__(self, p_lst: List[Production], order=None):
-        self._l = p_lst
-        self._d = {p.name: p for p in p_lst}
-        self._i = {p: i for i,p in enumerate(p_lst)}
+        self._d = OrderedDict([(p.name, p) for p in p_lst])
         self._accessible = self.compute_accessible()
     
     def compute_accessible(self):
@@ -42,7 +40,7 @@ class Productions(Mapping):
         accessible: Dict[Type, Set[Production]] = dict()
 
         # populate with productions whose left is concrete and right is complete
-        for p in self._l:
+        for _, p in self._d:
             if p.left.is_concrete() and p.right().is_complete():
                 if p.left not in accessible:
                     accessible[p.left] = set()
@@ -51,7 +49,7 @@ class Productions(Mapping):
             
         while True:
             fixpoint = True
-            for p in self._l:
+            for _, p in self._d:
                 ts = p.right().holes() # type holes
                 tc = [t for t in ts if t.is_concrete()] # concrete holes
                 ta = [t for t in ts if not t.is_concrete()] # abstract holes
@@ -83,21 +81,23 @@ class Productions(Mapping):
 
         return accessible
 
-    def __getitem__(self, i):
-        if isinstance(i, Type):
-            return self._accessible[i]
-        elif type(i) == int:
-            return self._l[i]
-        elif type(i) == str:
-            return self._d[i]
-        else:
-            return dict()[i]
+    def __getitem__(self, k):
+        return self._d[k]
 
     def __iter__(self):
-        return iter(self._l)
+        return iter(self._d)
     
     def __len__(self):
-        return len(self._l)
+        return len(self._d)
+    
+    def nth(self, i):
+        return self._d.nth(i)
+    
+    def index(self, k):
+        return self._d.index(k)
+    
+    def access(self, t: Type) -> Set[Production]:
+        return self._accessible[t]
     
     def print_accessible(self):
         fmt = "{:>20} {:>50}"
@@ -107,8 +107,12 @@ class Productions(Mapping):
     
     def print_ps(self):
         fmt = "{:>5} {}"
-        for i, p in enumerate(self._l):
+        for i, (_,p) in enumerate(self._d):
             print(fmt.format(i, str(p)))
+    
+    def vocabulary(self) -> ORDERED_SET[str]:
+        s: set = set().union(*[p.vocabulary() for _,p in self])
+        return OrderedSet(s)
     
     @staticmethod
     def generic() -> List[Production]:
