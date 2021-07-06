@@ -22,3 +22,7 @@ for s in seq:
     print(node)
 
 v = ps.vocabulary()
+tokens = node.tokenize()
+print(v)
+print(tokens)
+print(v.indices(tokens))
