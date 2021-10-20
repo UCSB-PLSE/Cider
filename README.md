@@ -13,6 +13,7 @@ SolInv/Venti inherits part of the [Trinity](https://github.com/fredfeng/Trinity)
 
 ```bash
 python ./example0.py
+tensorboard --host 0.0.0.0 --logdir=~/ray_results
 ```
 
 ## Design Notes
@@ -41,4 +42,17 @@ python ./example0.py
 
 - https://docs.ray.io/en/latest/rllib-training.html#customizing-exploration-behavior
 - https://docs.ray.io/en/latest/rllib-training.html#getting-started
+- https://codepen.io/sosuke/pen/Pjoqqp
+
+## TODO's
+
+- ✓ Cache the graph for every contract.
+- ✓ Repeat multipliers should be using different denominators across contracts.
+- ✓ Investigate into the memory overflow issue.
+- ✓ Improve action masking to rule out redundant flex actions.
+- ▢ Enable GPU support.
+- ▢ Switch to a more precise DSL.
+- ▢ Investigate reason of slow back propagation (need GPU?).
+- ▢ Use Slither to generate more compact graph representation.
+- ▢ Check and set a proper `max_step` in training.
 
