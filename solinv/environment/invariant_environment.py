@@ -21,6 +21,8 @@ from ..tyrell.dsl.utils import derive_dfs, get_hole_dfs
 from .invariant_heuristic import InvariantHeuristic
 from .error import EnvironmentError
 
+from .soltype_ast import get_soltype_ast, soltype_ast_to_igraph
+
 # import torch
 # class Tensor(torch.Tensor):
 #     @staticmethod
@@ -46,6 +48,7 @@ class InvariantEnvironment(gym.Env):
         self.start_type = config["start_type"]
         self.max_step = config["max_step"]
         self.interpreter = config["interpreter"]
+        self.use_solc_ast = config['use_solc_ast'] if 'use_solc_ast' in config else False
 
         # ================== #
         # vocabulary related #
@@ -69,23 +72,72 @@ class InvariantEnvironment(gym.Env):
         self.action_list = self.fixed_action_list + self.flex_action_list
         self.action_dict = {self.action_list[i]:i for i in range(len(self.action_list))}
 
-        self.special_token_list = ["<PAD>", "<ID>", "<REF>"]
-        self.reserved_identifier_token_list = ["require", "assert", "sender", "msg", "super", "now", "length", "this", "revert", "keccak256", "call"]
-        self.reserved_vertex_token_list = sorted([
-            "<DICT>", "<LIST>",
-            "!=", "+", "=", ">=", "<=", "!", "*", "/", "==", "%", "-", ">", "<", "||", "&&", "**", "-=", "+=", "*=", "/=",
-            "Mapping", 
-            "uint", "uint256", "uint8",
-            "bytes", "bytes32", "bytes4",
-            "number", "address", "bool", "string",
-            "<EVENT>", "<FUNCTION>", # fixme: should probably use <EVENT>?
-        ])
-        # list index will have int edge token
-        self.reserved_edge_token_list = sorted(list(range(20))) + sorted([
-            "arguments", "operator", "leftExpression", "rightExpression", "subExpression", "expression", "leftHandSide", "rightHandSide",
-            "baseExpression", "indexExpression", "topType", "keyType", "valueType", "condition", "trueBody", "memberName",
-            "components", "initialValue", "baseType", "body", 
-        ])
+        if self.use_solc_ast:
+            # solc slim AST tokens
+            self.special_token_list = ["<PAD>", "<ID>", "<REF>"]
+            self.reserved_identifier_token_list = ["require", "assert", "sender", "msg", "super", "now", "length", "this", "revert", "keccak256", "call"]
+            self.reserved_vertex_token_list = sorted([
+                "<DICT>", "<LIST>",
+                "!=", "+", "=", ">=", "<=", "!", "*", "/", "==", "%", "-", ">", "<", "||", "&&", "**", "-=", "+=", "*=", "/=",
+                "Mapping", 
+                "uint", "uint256", "uint8",
+                "bytes", "bytes32", "bytes4",
+                "number", "address", "bool", "string",
+                "<EVENT>", "<FUNCTION>", # fixme: should probably use <EVENT>?
+            ])
+            print(self.reserved_vertex_token_list)
+            # list index will have int edge token
+            self.reserved_edge_token_list = sorted(list(range(20))) + sorted([
+                "arguments", "operator", "leftExpression", "rightExpression", "subExpression", "expression", "leftHandSide", "rightHandSide",
+                "baseExpression", "indexExpression", "topType", "keyType", "valueType", "condition", "trueBody", "memberName",
+                "components", "initialValue", "baseType", "body", 
+            ])
+        else:
+            # solType slim AST tokens
+            self.special_token_list = ["<PAD>", "<ID>", "<REF>"]
+            self.reserved_identifier_token_list = [] # TODO: populate this
+            self.reserved_vertex_token_list = sorted([
+                '<CONTRACT>',
+                # expressions
+                '<VAR>',
+                'CInt', 'CBool',
+                "Unary_not", "!=", ">=", "<=", ">", "<", "==", "||", "&&", 
+                "+", "-",  "*", "/", "%", "**",
+                "+=", "-=", "*=", "/=",
+                'EMapInd', 'EField', 'EHavoc',
+                # lvalues
+                'LvInd', 'LvFld',
+                # statements
+                'SAsn', 'SCall', 'SDecl', 'SIf', 'SReturn', 'SWhile', 'SHavoc',
+                # declarations
+                'DCtor',
+                'DFun', 'DFun_arg',
+                'DStruct',
+                # types
+                'TyMapping', 'TyStruct', 'TyArray', 'TyAddress', 'TyInt', 'TyInt256', 'TyBool', 'TyByte'])
+            self.reserved_edge_token_list = sorted(list(range(20))) + sorted([
+                # expressions
+                'Var_name', 'Unary_e', 'Binary_lhs', 'Binary_rhs', 
+                'EField_fld', 'EField_struct', 'EMapInd_ind', 'EMapInd_map', 
+                # lvalues
+                'LvFld_fld', 'LvFld_struct', 'LvInd_ind', 'LvInd_map', 
+                # statements
+                'SAsn_lhs', 'SAsn_rhs', 'SCall_args', 'SCall_args_first', 'SCall_args_next', 'SCall_name', 
+                'SIf_cond', 'SIf_else', 'SIf_then', 'SIf_then_first', 'SIf_then_next', 'SIf_else_first', 'SIf_else_next',
+                'SWhile_cond', 'SWhile_body_first', 'SWhile_body_next',
+                # declarations
+                'DCtor_args', 'DCtor_body', 
+                'DFun_args', 'DFun_body', 'DFun_name',
+                'DFun_args_first', 'DFun_args_next', 'DFun_arg_name', 'DFun_arg_type',
+                'DFun_body_first', 'DFun_body_next', 
+                'DVar_expr', 'DVar_name', 'DVar_type', 
+                # types
+                'TyMapping_dst', 'TyArray_elem',
+                # contract
+                'DFun_first', 'DFun_next',
+                # special
+                'contents'])
+
         # every token in the token list should have a fixed embedding for
         self.base_token_list = self.special_token_list \
                              + self.reserved_identifier_token_list \
@@ -148,23 +200,39 @@ class InvariantEnvironment(gym.Env):
             # ================ #
             # tokenize the target contract
             self.contract_json = self.get_contract_ast(self.contract_path, self.solc_version)
-            self.contract_static_env, self.contract_slim_ast = self.get_slim_ast(self.contract_json)
-            # print("# slim ast looks like:\n{}".format(self.contract_slim_ast))
-            # e2n: variable name -> node id
-            #      e.g., {'_balances': 0, '_totalSupply': 4, 'account': 5, 'value': 6}
-            # e2r: variable name -> list of node ids that refer to this variable, e.g., 
-            #      {'account': [13, 37, 42],
-            #       '_totalSupply': [22, 24, 28, 31],
-            #       'value': [23, 32, 43],
-            #       '_balances': [36, 41]}
-            # - an variable name is NOT always a stovar
-            # - an identifier is NOT always a variable (it could also be some reserved one like "require")
-            self.contract_e2n, self.contract_e2r, self.contract_igraph, self.contract_root_id = self.slim_ast_to_igraph(self.contract_static_env, self.contract_slim_ast)
+            
+            if self.use_solc_ast:
+                # Use solc slim AST
+                self.contract_static_env, self.contract_slim_ast = self.get_slim_ast(self.contract_json)
+                # print("# slim ast looks like:\n{}".format(self.contract_slim_ast))
+                # e2n: variable name -> node id
+                #      e.g., {'_balances': 0, '_totalSupply': 4, 'account': 5, 'value': 6}
+                # e2r: variable name -> list of node ids that refer to this variable, e.g., 
+                #      {'account': [13, 37, 42],
+                #       '_totalSupply': [22, 24, 28, 31],
+                #       'value': [23, 32, 43],
+                #       '_balances': [36, 41]}
+                # - an variable name is NOT always a stovar
+                # - an identifier is NOT always a variable (it could also be some reserved one like "require")
+                self.contract_e2n, self.contract_e2r, self.contract_igraph, self.contract_root_id = self.slim_ast_to_igraph(self.contract_static_env, self.contract_slim_ast)
+                print(self.contract_e2n)
+                print(self.contract_e2r)
+                print(self.contract_root_id)
+            else:
+                self.contract_static_env = {}
+                self.contract_slim_ast, vs, es, var_v = get_soltype_ast(self.contract_json)
+                self.contract_e2n, self.contract_e2r, self.contract_igraph, self.contract_root_id = soltype_ast_to_igraph(self.contract_slim_ast, vs, es, var_v)
+                print(self.contract_e2n)
+                print(self.contract_e2r)
+                print(self.contract_root_id)
             # self.contract_networkx = igraph.Graph.to_networkx(self.contract_igraph)
             # map tokens to corresponding ids (no variable will show up since the graph is already anonymous)
             self.contract_encoded_igraph = self.contract_igraph.copy()
             for p in self.contract_encoded_igraph.vs:
-                p["token"] = self.token_dict[p["token"]]
+                try:
+                    p["token"] = self.token_dict[p["token"]]
+                except KeyError:
+                    print(p["token"], self.token_dict.keys())
             for p in self.contract_encoded_igraph.es:
                 p["token"] = self.token_dict[p["token"]]
             self.contract_observed = {
@@ -272,19 +340,31 @@ class InvariantEnvironment(gym.Env):
         if cmd_set.returncode != 0:
             raise Exception("Error executing solc-select. Check your environment configuration.")
 
-        cmd_solc = subprocess.run("solc {} --ast-compact-json".format(arg_path), shell=True, capture_output=True)
-        if cmd_solc.returncode != 0:
-            raise Exception("Error executing solc <contract_path> --ast-compact-json. Check your environment configuration.")
+        if self.use_solc_ast:
+            # Use solc AST
+            cmd_solc = subprocess.run("solc {} --ast-compact-json".format(arg_path), shell=True, capture_output=True)
+            if cmd_solc.returncode != 0:
+                raise Exception("Error executing solc <contract_path> --ast-compact-json. Check your environment configuration.")
 
-        raw_output = cmd_solc.stdout.decode("utf-8")
-        # strip out the irrelevant part
-        tmp_pos = raw_output.index("=======\n") # raise if not found
-        raw_json = raw_output[tmp_pos+len("=======\n"):]
+            raw_output = cmd_solc.stdout.decode("utf-8")
+            # strip out the irrelevant part
+            tmp_pos = raw_output.index("=======\n") # raise if not found
+            raw_json = raw_output[tmp_pos+len("=======\n"):]
+        else:
+            # Use SolType AST
+            cmd = f"liquidsol-exe {arg_path} --task ast --only-last"
+            cmd_ast = subprocess.run(cmd, shell=True, capture_output=True)
+            if cmd_ast.returncode != 0:
+                raise Exception(f"Error executing {cmd}. Check your environment configuration.")
+            remove_first_line = lambda s: '\n'.join(s.split('\n')[1:])
+            raw_output = cmd_ast.stdout.decode("utf-8")
+            raw_json = remove_first_line(raw_output)
+
         parsed_json = json.loads(raw_json)
         return parsed_json
 
     def get_contract_stovars(self, arg_path):
-        cmd_sto = subprocess.run("liquidsol-exe {} --task stovars".format(arg_path), shell=True, capture_output=True)
+        cmd_sto = subprocess.run("liquidsol-exe {} --task vars".format(arg_path), shell=True, capture_output=True)
         assert(cmd_sto.returncode == 0)
         raw_output = cmd_sto.stdout.decode("utf-8")
         lines = raw_output.rstrip().split("\n")
@@ -566,7 +646,7 @@ class InvariantEnvironment(gym.Env):
         )
         return (env_id_to_node_id, env_id_to_ref_ids, tmp_graph, root_id)
 
-    # this oeprates in place
+    # this operates in place
     # returns the current vertex id
     def _rec_construct_edges_and_vertices(self, e2n, e2r, arg_slim_ast, vertex_token_list, edge_list, edge_token_list):
         # print("# processing: {}".format(arg_slim_ast))
