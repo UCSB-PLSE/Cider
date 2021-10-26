@@ -21,17 +21,7 @@ from ..tyrell.dsl.utils import derive_dfs, get_hole_dfs
 from .invariant_heuristic import InvariantHeuristic
 from .error import EnvironmentError
 
-from .soltype_ast import get_soltype_ast, soltype_ast_to_igraph
-
-# import torch
-# class Tensor(torch.Tensor):
-#     @staticmethod
-#     def __new__(cls, *args, info=None, **kwargs):
-#         return super().__new__(cls, *args, **kwargs)
-    
-#     def __init__(self, *args, info=None, **kwargs):
-#         super().__init__() # optional
-#         self.info = info
+from .soltype_ast import get_soltype_ast, soltype_ast_to_igraph, insert_padding_node, add_reversed_edges
 
 class InvariantEnvironment(gym.Env):
     # note: class static variable
@@ -40,6 +30,7 @@ class InvariantEnvironment(gym.Env):
     cached_contract_utils = {}
 
     CONTRACT_MAX_IDS   = 100
+    CONTRACT_MAX_NODES = 1000
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -48,7 +39,6 @@ class InvariantEnvironment(gym.Env):
         self.start_type = config["start_type"]
         self.max_step = config["max_step"]
         self.interpreter = config["interpreter"]
-        self.use_solc_ast = config['use_solc_ast'] if 'use_solc_ast' in config else False
 
         # ================== #
         # vocabulary related #
@@ -71,72 +61,56 @@ class InvariantEnvironment(gym.Env):
         # note: re-order action list to have fixed+flex order
         self.action_list = self.fixed_action_list + self.flex_action_list
         self.action_dict = {self.action_list[i]:i for i in range(len(self.action_list))}
+        # note: see notes in `observe_action_seq`
+        assert self.action_list[0].name == "empty", "Need `empty` as the first production rule in DSL."
 
-        if self.use_solc_ast:
-            # solc slim AST tokens
-            self.special_token_list = ["<PAD>", "<ID>", "<REF>"]
-            self.reserved_identifier_token_list = ["require", "assert", "sender", "msg", "super", "now", "length", "this", "revert", "keccak256", "call"]
-            self.reserved_vertex_token_list = sorted([
-                "<DICT>", "<LIST>",
-                "!=", "+", "=", ">=", "<=", "!", "*", "/", "==", "%", "-", ">", "<", "||", "&&", "**", "-=", "+=", "*=", "/=",
-                "Mapping", 
-                "uint", "uint256", "uint8",
-                "bytes", "bytes32", "bytes4",
-                "number", "address", "bool", "string",
-                "<EVENT>", "<FUNCTION>", # fixme: should probably use <EVENT>?
-            ])
-            print(self.reserved_vertex_token_list)
-            # list index will have int edge token
-            self.reserved_edge_token_list = sorted(list(range(20))) + sorted([
-                "arguments", "operator", "leftExpression", "rightExpression", "subExpression", "expression", "leftHandSide", "rightHandSide",
-                "baseExpression", "indexExpression", "topType", "keyType", "valueType", "condition", "trueBody", "memberName",
-                "components", "initialValue", "baseType", "body", 
-            ])
-        else:
-            # solType slim AST tokens
-            self.special_token_list = ["<PAD>", "<ID>", "<REF>"]
-            self.reserved_identifier_token_list = [] # TODO: populate this
-            self.reserved_vertex_token_list = sorted([
-                '<CONTRACT>',
-                # expressions
-                '<VAR>',
-                'CInt', 'CBool',
-                "Unary_not", "!=", ">=", "<=", ">", "<", "==", "||", "&&", 
-                "+", "-",  "*", "/", "%", "**",
-                "+=", "-=", "*=", "/=",
-                'EMapInd', 'EField', 'EHavoc',
-                # lvalues
-                'LvInd', 'LvFld',
-                # statements
-                'SAsn', 'SCall', 'SDecl', 'SIf', 'SReturn', 'SWhile', 'SHavoc',
-                # declarations
-                'DCtor',
-                'DFun', 'DFun_arg',
-                'DStruct',
-                # types
-                'TyMapping', 'TyStruct', 'TyArray', 'TyAddress', 'TyInt', 'TyInt256', 'TyBool', 'TyByte'])
-            self.reserved_edge_token_list = sorted(list(range(20))) + sorted([
-                # expressions
-                'Var_name', 'Unary_e', 'Binary_lhs', 'Binary_rhs', 
-                'EField_fld', 'EField_struct', 'EMapInd_ind', 'EMapInd_map', 
-                # lvalues
-                'LvFld_fld', 'LvFld_struct', 'LvInd_ind', 'LvInd_map', 
-                # statements
-                'SAsn_lhs', 'SAsn_rhs', 'SCall_args', 'SCall_args_first', 'SCall_args_next', 'SCall_name', 
-                'SIf_cond', 'SIf_else', 'SIf_then', 'SIf_then_first', 'SIf_then_next', 'SIf_else_first', 'SIf_else_next',
-                'SWhile_cond', 'SWhile_body_first', 'SWhile_body_next',
-                # declarations
-                'DCtor_args', 'DCtor_body', 
-                'DFun_args', 'DFun_body', 'DFun_name',
-                'DFun_args_first', 'DFun_args_next', 'DFun_arg_name', 'DFun_arg_type',
-                'DFun_body_first', 'DFun_body_next', 
-                'DVar_expr', 'DVar_name', 'DVar_type', 
-                # types
-                'TyMapping_dst', 'TyArray_elem',
-                # contract
-                'DFun_first', 'DFun_next',
-                # special
-                'contents'])
+        # solType slim AST tokens
+        self.special_token_list = ["<PAD>", "<ID>", "<REF>"]
+        self.reserved_identifier_token_list = [] # TODO: populate this
+        self.reserved_vertex_token_list = sorted([
+            '<CONTRACT>',
+            # expressions
+            '<VAR>',
+            'CInt', 'CBool',
+            "Unary_not", "!=", ">=", "<=", ">", "<", "==", "||", "&&", 
+            "+", "-",  "*", "/", "%", "**",
+            "+=", "-=", "*=", "/=",
+            'EMapInd', 'EField', 'EHavoc',
+            # lvalues
+            'LvInd', 'LvFld',
+            # statements
+            'SAsn', 'SCall', 'SDecl', 'SIf', 'SReturn', 'SWhile', 'SHavoc',
+            # declarations
+            'DCtor',
+            'DFun', 'DFun_arg',
+            'DStruct',
+            # types
+            'TyMapping', 'TyStruct', 'TyArray', 'TyAddress', 'TyInt', 'TyInt256', 'TyBool', 'TyByte'])
+        self.reserved_edge_token_list = sorted([
+            # expressions
+            'Var_name', 'Unary_e', 'Binary_lhs', 'Binary_rhs', 
+            'EField_fld', 'EField_struct', 'EMapInd_ind', 'EMapInd_map', 
+            # lvalues
+            'LvFld_fld', 'LvFld_struct', 'LvInd_ind', 'LvInd_map', 
+            # statements
+            'SAsn_lhs', 'SAsn_rhs', 'SCall_args', 'SCall_args_first', 'SCall_args_next', 'SCall_name', 
+            'SIf_cond', 'SIf_else', 'SIf_then', 'SIf_then_first', 'SIf_then_next', 'SIf_else_first', 'SIf_else_next',
+            'SWhile_cond', 'SWhile_body_first', 'SWhile_body_next',
+            # declarations
+            'DCtor_args', 'DCtor_body', 
+            'DFun_args', 'DFun_body', 'DFun_name',
+            'DFun_args_first', 'DFun_args_next', 'DFun_arg_name', 'DFun_arg_type',
+            'DFun_body_first', 'DFun_body_next', 
+            'DVar_expr', 'DVar_name', 'DVar_type', 
+            # types
+            'TyMapping_dst', 'TyArray_elem',
+            # contract
+            'DFun_first', 'DFun_next',
+            # special
+            'contents'])
+        # extend the edge token with reversed version
+        tmp_reversed_edge_token_list = ["REV_{}".format(p) for p in self.reserved_edge_token_list]
+        self.reserved_edge_token_list = sorted( self.reserved_edge_token_list+tmp_reversed_edge_token_list )
 
         # every token in the token list should have a fixed embedding for
         self.base_token_list = self.special_token_list \
@@ -145,6 +119,10 @@ class InvariantEnvironment(gym.Env):
                              + self.reserved_edge_token_list
         self.token_list = self.base_token_list + self.fixed_action_list
         self.token_dict = {self.token_list[i]:i for i in range(len(self.token_list))}
+
+        # fixme: here we setup all contracts first to prevent contract id not found error in non local mode of RLlib
+        for i in range(len(config["contracts"])):
+            self.setup(config, arg_id=i)
 
         # this caches contract utils for faster switching
         # between cotnracts in training between different rollouts
@@ -159,9 +137,14 @@ class InvariantEnvironment(gym.Env):
             "start": gym.spaces.Box(0,1,shape=(1,),dtype=np.int32),
             "contract_id": gym.spaces.Box(0, InvariantEnvironment.CONTRACT_MAX_IDS, shape=(1,), dtype=np.int32),
             "action_mask": gym.spaces.Box(0, 1, shape=(len(self.action_list),), dtype=np.int32), # for output layer, no need to + len(sptok_list)
-            # fixme: 1000 should be MAX_NODES
-            "nn_seq": gym.spaces.Box(0, len(self.token_list)+1000, shape=(self.max_step, ), dtype=np.int32), # for encoding layer, need to + len(sptok_list)
-            "all_actions": gym.spaces.Box(0, len(self.token_list)+1000, shape=(len(self.action_list),), dtype=np.int32), # for dynamic action output, remain the same for the same contract
+            
+            # action_seq series: returns the current action sequence, in two channels, with <PAD> for padding and values belonging to other channel
+            "action_seq@token_channel": gym.spaces.Box(0, len(self.token_list), shape=(self.max_step,), dtype=np.int32),
+            "action_seq@node_channel": gym.spaces.Box(0, InvariantEnvironment.CONTRACT_MAX_NODES, shape=(self.max_step,), dtype=np.int32),
+
+            # all_actions series: for dynamic action output, remain the same for the same contract, same channelling style
+            "all_actions@token_channel": gym.spaces.Box(0, len(self.token_list), shape=(len(self.action_list),), dtype=np.int32),
+            "all_actions@node_channel": gym.spaces.Box(0, InvariantEnvironment.CONTRACT_MAX_NODES, shape=(len(self.action_list),), dtype=np.int32),
         })
 
     def setup(self, arg_config, arg_id=None):
@@ -177,7 +160,6 @@ class InvariantEnvironment(gym.Env):
             self.contract_path = cached["contract_path"]
             self.solc_version = cached["solc_version"]
             self.contract_json = cached["contract_json"]
-            self.contract_static_env = cached["contract_static_env"]
             self.contract_slim_ast = cached["contract_slim_ast"]
             self.contract_e2n = cached["contract_e2n"]
             self.contract_e2r = cached["contract_e2r"]
@@ -201,30 +183,29 @@ class InvariantEnvironment(gym.Env):
             # tokenize the target contract
             self.contract_json = self.get_contract_ast(self.contract_path, self.solc_version)
             
-            if self.use_solc_ast:
-                # Use solc slim AST
-                self.contract_static_env, self.contract_slim_ast = self.get_slim_ast(self.contract_json)
-                # print("# slim ast looks like:\n{}".format(self.contract_slim_ast))
-                # e2n: variable name -> node id
-                #      e.g., {'_balances': 0, '_totalSupply': 4, 'account': 5, 'value': 6}
-                # e2r: variable name -> list of node ids that refer to this variable, e.g., 
-                #      {'account': [13, 37, 42],
-                #       '_totalSupply': [22, 24, 28, 31],
-                #       'value': [23, 32, 43],
-                #       '_balances': [36, 41]}
-                # - an variable name is NOT always a stovar
-                # - an identifier is NOT always a variable (it could also be some reserved one like "require")
-                self.contract_e2n, self.contract_e2r, self.contract_igraph, self.contract_root_id = self.slim_ast_to_igraph(self.contract_static_env, self.contract_slim_ast)
-                print(self.contract_e2n)
-                print(self.contract_e2r)
-                print(self.contract_root_id)
-            else:
-                self.contract_static_env = {}
-                self.contract_slim_ast, vs, es, var_v = get_soltype_ast(self.contract_json)
-                self.contract_e2n, self.contract_e2r, self.contract_igraph, self.contract_root_id = soltype_ast_to_igraph(self.contract_slim_ast, vs, es, var_v)
-                print(self.contract_e2n)
-                print(self.contract_e2r)
-                print(self.contract_root_id)
+            # e2n: variable name -> node id
+            #      e.g., {'_balances': 0, '_totalSupply': 4, 'account': 5, 'value': 6}
+            # e2r: variable name -> list of node ids that refer to this variable, e.g., 
+            #      {'account': [13, 37, 42],
+            #       '_totalSupply': [22, 24, 28, 31],
+            #       'value': [23, 32, 43],
+            #       '_balances': [36, 41]}
+            # - an variable name is NOT always a stovar
+            # - an identifier is NOT always a variable (it could also be some reserved one like "require")
+            self.contract_slim_ast, vs, es, var_v = get_soltype_ast(self.contract_json)
+            self.contract_e2n, self.contract_e2r, self.contract_igraph, self.contract_root_id = soltype_ast_to_igraph(self.contract_slim_ast, vs, es, var_v)
+            # note: add reversed edges
+            self.contract_igraph = add_reversed_edges(self.contract_igraph)
+            # note: adding an extra padding node
+            self.contract_igraph, self.contract_e2n, self.contract_e2r, self.contract_root_id = insert_padding_node(
+                self.contract_igraph, self.contract_e2n, self.contract_e2r, self.contract_root_id
+            )
+            print("# ======")
+            print("# contract: {}\n# e2n: {}\n# e2r: {}\n# root: {}\n# num_nodes: {}\n# num_edges: {}".format(
+                self.contract_path, self.contract_e2n, self.contract_e2r, self.contract_root_id,
+                len(self.contract_igraph.vs), len(self.contract_igraph.es),
+            ))
+            print("# ======")
             # self.contract_networkx = igraph.Graph.to_networkx(self.contract_igraph)
             # map tokens to corresponding ids (no variable will show up since the graph is already anonymous)
             self.contract_encoded_igraph = self.contract_igraph.copy()
@@ -232,7 +213,7 @@ class InvariantEnvironment(gym.Env):
                 try:
                     p["token"] = self.token_dict[p["token"]]
                 except KeyError:
-                    print(p["token"], self.token_dict.keys())
+                    raise NotImplementedError("Unsupported token, got: {}.".format(p["token"]))
             for p in self.contract_encoded_igraph.es:
                 p["token"] = self.token_dict[p["token"]]
             self.contract_observed = {
@@ -264,7 +245,6 @@ class InvariantEnvironment(gym.Env):
             cached["contract_path"] = self.contract_path
             cached["solc_version"] = self.solc_version
             cached["contract_json"] = self.contract_json
-            cached["contract_static_env"] = self.contract_static_env
             cached["contract_slim_ast"] = self.contract_slim_ast
             cached["contract_e2n"] = self.contract_e2n
             cached["contract_e2r"] = self.contract_e2r
@@ -285,29 +265,32 @@ class InvariantEnvironment(gym.Env):
         # action_seq: represented using ids from action_list, for internal tracking of the environment
         self.curr_action_seq = None
 
-    def action_seq_to_nn_seq(self, arg_action_seq):
-        # nn_seq: represented using ids from (overflow) embedding, for internal tracking of the neural network
-        # orderings:
-        #   [ inflow                      | overflow             ]
-        #   [ token list                  | node id space        ]
-        #   [ base tokens | fixed actions | node id space        ]
-        #   [ off-the-shelf embeddings    | aggregated embedings ]
-        # for node id part, node_id = nn_id - len(token_list), i.e., the remaining (overflow part) is the id
-        ret_seq = []
+    def observe_action_seq(self, arg_action_seq):
+        # turn designated nn_seq into its observed form (channelling)
+        # returns: two channels of the same action sequence
+
+        # note: <PAD> will usually here point to 0, which in action list should be `empty` production rule
+        #       we also abuse a bit here that the following three tokens all have "padding" functionalities with id 0:
+        #       - `empty` production rule
+        #       - <PAD> in token
+        #       - a pddding node with <PAD> label 
+        #         (a padding node should always have <PAD> label, but a node with <PAD> is not always a padding node)
+        ret_seq_token, ret_seq_node = [], []
         for p in arg_action_seq:
             if p >= len(self.fixed_action_list):
                 # flex action
                 if self.action_list[p] in self.flex_action_to_stovar.keys():
-                    ret_seq.append(
-                        self.contract_e2n[self.flex_action_to_stovar[self.action_list[p]]] + len(self.base_token_list)
-                    )
+                    ret_seq_token.append(self.token_dict["<PAD>"])
+                    ret_seq_node.append(self.contract_e2n[self.flex_action_to_stovar[self.action_list[p]]])
                 else:
-                    # this action does not have corresponding id in graph, use padding
-                    ret_seq.append( self.token_dict["<PAD>"] )
+                    # this action does not have corresponding stovar (the prod is not useful), use padding instead
+                    ret_seq_token.append(self.token_dict["<PAD>"])
+                    ret_seq_node.append(self.token_dict["<PAD>"])
             else:
                 # fixed action
-                ret_seq.append(p+len(self.base_token_list))
-        return ret_seq
+                ret_seq_token.append(p)
+                ret_seq_node.append(self.token_dict["<PAD>"])
+        return ret_seq_token, ret_seq_node
 
     def pad_to_length(self, arg_obj, arg_length):
         return arg_obj + [self.token_dict["<PAD>"] for _ in range(arg_length-len(arg_obj))]
@@ -340,25 +323,14 @@ class InvariantEnvironment(gym.Env):
         if cmd_set.returncode != 0:
             raise Exception("Error executing solc-select. Check your environment configuration.")
 
-        if self.use_solc_ast:
-            # Use solc AST
-            cmd_solc = subprocess.run("solc {} --ast-compact-json".format(arg_path), shell=True, capture_output=True)
-            if cmd_solc.returncode != 0:
-                raise Exception("Error executing solc <contract_path> --ast-compact-json. Check your environment configuration.")
-
-            raw_output = cmd_solc.stdout.decode("utf-8")
-            # strip out the irrelevant part
-            tmp_pos = raw_output.index("=======\n") # raise if not found
-            raw_json = raw_output[tmp_pos+len("=======\n"):]
-        else:
-            # Use SolType AST
-            cmd = f"liquidsol-exe {arg_path} --task ast --only-last"
-            cmd_ast = subprocess.run(cmd, shell=True, capture_output=True)
-            if cmd_ast.returncode != 0:
-                raise Exception(f"Error executing {cmd}. Check your environment configuration.")
-            remove_first_line = lambda s: '\n'.join(s.split('\n')[1:])
-            raw_output = cmd_ast.stdout.decode("utf-8")
-            raw_json = remove_first_line(raw_output)
+        # Use SolType AST
+        cmd = f"liquidsol-exe {arg_path} --task ast --only-last"
+        cmd_ast = subprocess.run(cmd, shell=True, capture_output=True)
+        if cmd_ast.returncode != 0:
+            raise Exception(f"Error executing {cmd}. Check your environment configuration.")
+        remove_first_line = lambda s: '\n'.join(s.split('\n')[1:])
+        raw_output = cmd_ast.stdout.decode("utf-8")
+        raw_json = remove_first_line(raw_output)
 
         parsed_json = json.loads(raw_json)
         return parsed_json
@@ -386,326 +358,6 @@ class InvariantEnvironment(gym.Env):
         tmp_list = list(set(tmp_list))
         # print("# number of stovars: {}, stovars are: {}".format(len(tmp_list), tmp_list))
         return tmp_list
-
-    # fixme: need to adjust the extraction method to account for different contracts
-    # note: currently the whole environment assumes globally unique variable/identifier name
-    #       i.e., all variables can only be defined once, regardless of any scope
-    def get_slim_ast(self, arg_json):
-        # start from a specific "ContractDefinition" node
-        start_json = arg_json
-        static_env = {}
-        return_json = self._rec_extract_slim_ast(start_json, static_env)
-        squeeze_json = self._rec_squeeze_none(return_json)
-        # note: clean both the return_json and env
-        # print("static_env: {}".format(static_env))
-        for dkey in static_env.keys():
-            static_env[dkey] = self._rec_squeeze_none(static_env[dkey])
-            # big-fixme: if is None, replace with a temporary
-            # assert static_env[dkey] is not None
-            if static_env[dkey] is None:
-                static_env[dkey] = "<PAD>"
-        return (static_env, squeeze_json)
-
-    # final processing of a slim ast that removes redundant patterns like:
-    # - None
-    # - [None, ...]
-    # - etc.
-    def _rec_squeeze_none(self, arg_json):
-        if isinstance(arg_json, list):
-            clist = [self._rec_squeeze_none(p) for p in arg_json]
-            if len(clist) == 0:
-                # no element here
-                return None
-            tt = all(list(map(lambda x: x is None, clist)))
-            if tt:
-                # all are None
-                return None
-            return clist
-        elif isinstance(arg_json, dict):
-            cdict = {dkey:self._rec_squeeze_none(arg_json[dkey]) for dkey in arg_json.keys()}
-            if len(cdict) == 0:
-                # no element here
-                return None
-            tt = all(list(map(lambda x: x is None, [cdict[dkey] for dkey in cdict.keys()])))
-            if tt:
-                # all are None
-                return None
-            # if a value for a key is None, remove it
-            for dkey in list(cdict.keys()):
-                if cdict[dkey] is None:
-                    del cdict[dkey]
-            return cdict
-        elif arg_json is None:
-            return None
-        elif isinstance(arg_json, str):
-            # actual value, e.g., fixed keyword
-            return arg_json
-        elif isinstance(arg_json, tuple):
-            # identifier pair: (<IDENTIFIER>, ??)
-            return arg_json
-        else:
-            raise NotImplementedError("Unsupported type, got: {}.".format(type(arg_json)))
-
-    # venv: virtual environemnt that provies access to in-scope variable declarations
-    def _rec_extract_slim_ast(self, arg_json, inherited_venv):
-        ret_obj = None
-        if arg_json is None:
-            # skip
-            pass
-        elif isinstance(arg_json, dict):
-            if "nodeType" in arg_json.keys():
-                if arg_json["nodeType"] == "SourceUnit":
-                    ret_obj = [self._rec_extract_slim_ast(p, inherited_venv) for p in arg_json["nodes"]]
-                elif arg_json["nodeType"] == "ContractDefinition":
-                    ret_obj = [self._rec_extract_slim_ast(p, inherited_venv) for p in arg_json["nodes"]]
-                elif arg_json["nodeType"] == "VariableDeclaration":
-                    tmp_name = arg_json["name"]
-                    tmp_type = self._rec_extract_slim_ast(arg_json["typeName"], inherited_venv)
-                    # directly override even if there's already on in inherited env
-                    inherited_venv[tmp_name] = tmp_type
-                elif arg_json["nodeType"] == "FunctionDefinition":
-                    # first set the parameters' types into local env
-                    for p in arg_json["parameters"]["parameters"]:
-                        self._rec_extract_slim_ast(p, inherited_venv) 
-                    for p in arg_json["returnParameters"]["parameters"]:
-                        self._rec_extract_slim_ast(p, inherited_venv)
-                    ret_obj = self._rec_extract_slim_ast(arg_json["body"], inherited_venv)
-                    # then store the definition to the environment
-                    tmp_name = arg_json["name"]
-                    inherited_venv[tmp_name] = "<FUNCTION>"
-                elif arg_json["nodeType"] == "ElementaryTypeName":
-                    ret_obj = arg_json["name"]
-                elif arg_json["nodeType"] == "Mapping":
-                    ret_obj = {
-                        "topType": "Mapping",
-                        "keyType": self._rec_extract_slim_ast(arg_json["keyType"], inherited_venv),
-                        "valueType": self._rec_extract_slim_ast(arg_json["valueType"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "Block":
-                    ret_obj = [self._rec_extract_slim_ast(p, inherited_venv) for p in arg_json["statements"]]
-                elif arg_json["nodeType"] == "ExpressionStatement":
-                    ret_obj = self._rec_extract_slim_ast(arg_json["expression"], inherited_venv)
-                elif arg_json["nodeType"] == "FunctionCall":
-                    ret_obj = {
-                        "arguments": [self._rec_extract_slim_ast(p, inherited_venv) for p in arg_json["arguments"]],
-                        "expression": self._rec_extract_slim_ast(arg_json["expression"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "Identifier":
-                    if arg_json["name"] in self.reserved_identifier_token_list:
-                        # use the original value
-                        ret_obj = arg_json["name"]
-                    else:
-                        ret_obj = ("<IDENTIFIER>", arg_json["name"])
-                elif arg_json["nodeType"] == "Literal":
-                    if arg_json["kind"] == "number":
-                        ret_obj = "number"
-                    elif arg_json["kind"] == "bool":
-                        ret_obj = "bool"
-                    elif arg_json["kind"] == "string":
-                        ret_obj = "string"
-                    else:
-                        raise NotImplementedError("Unsupported literal, got: {}.".format(arg_json))
-                elif arg_json["nodeType"] == "BinaryOperation":
-                    ret_obj = {
-                        "operator": arg_json["operator"],
-                        "leftExpression": self._rec_extract_slim_ast(arg_json["leftExpression"], inherited_venv),
-                        "rightExpression": self._rec_extract_slim_ast(arg_json["rightExpression"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "Assignment":
-                    ret_obj = {
-                        "operator": arg_json["operator"],
-                        "leftHandSide": self._rec_extract_slim_ast(arg_json["leftHandSide"], inherited_venv),
-                        "rightHandSide": self._rec_extract_slim_ast(arg_json["rightHandSide"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "IndexAccess":
-                    ret_obj = {
-                        "baseExpression": self._rec_extract_slim_ast(arg_json["baseExpression"], inherited_venv),
-                        "indexExpression": self._rec_extract_slim_ast(arg_json["indexExpression"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "IfStatement":
-                    ret_obj = {
-                        "condition": self._rec_extract_slim_ast(arg_json["condition"], inherited_venv),
-                        "trueBody": self._rec_extract_slim_ast(arg_json["trueBody"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "Return":
-                    ret_obj = {
-                        "expression": self._rec_extract_slim_ast(arg_json["expression"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "VariableDeclarationStatement":
-                    ret_obj = {
-                        "initialValue": self._rec_extract_slim_ast(arg_json["initialValue"], inherited_venv),
-                        "declarations": [self._rec_extract_slim_ast(p, inherited_venv) for p in arg_json["declarations"]],
-                    }
-                    # remove key if all of the list members are None
-                    tmp_ss = list(set(ret_obj["declarations"]))
-                    if len(tmp_ss) == 0:
-                        del ret_obj["declarations"]
-                    elif len(tmp_ss) == 1 and tmp_ss[0] is None:
-                        del ret_obj["declarations"]
-                elif arg_json["nodeType"] == "ElementaryTypeNameExpression":
-                    if arg_json["typeName"] == "address":
-                        ret_obj = "address"
-                    elif arg_json["typeName"] == "uint256":
-                        ret_obj = "uint256"
-                    elif arg_json["typeName"] == "bytes32":
-                        ret_obj = "bytes32"
-                    elif arg_json["typeName"] == "bytes4":
-                        ret_obj = "bytes4"
-                    else:
-                        raise NotImplementedError("Unsupported type name, got: {}.".format(arg_json["typeName"]))
-                elif arg_json["nodeType"] == "MemberAccess":
-                    m = None
-                    if arg_json["memberName"] in self.reserved_identifier_token_list:
-                        # use the original value
-                        m = arg_json["memberName"]
-                    else:
-                        m = ("<IDENTIFIER>", arg_json["memberName"])
-                    ret_obj = {
-                        "memberName": m,
-                        "expression": self._rec_extract_slim_ast(arg_json["expression"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "TupleExpression":
-                    ret_obj = {
-                        "components": [self._rec_extract_slim_ast(p, inherited_venv) for p in arg_json["components"]]
-                    }
-                elif arg_json["nodeType"] == "UnaryOperation":
-                    ret_obj = {
-                        "operator": arg_json["operator"],
-                        "subExpression": self._rec_extract_slim_ast(arg_json["subExpression"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "ModifierDefinition":
-                    ret_obj = self._rec_extract_slim_ast(arg_json["body"], inherited_venv)
-                elif arg_json["nodeType"] == "ArrayTypeName":
-                    ret_obj = {
-                        "baseType": self._rec_extract_slim_ast(arg_json["baseType"], inherited_venv)
-                    }
-                elif arg_json["nodeType"] == "ForStatement":
-                    # fixme: I'm skipping the initializationExpression and the loopExpression here
-                    # fixme: the processing of initializationExpression and loopExpression are too coarse-grained
-                    self._rec_extract_slim_ast(arg_json["initializationExpression"], inherited_venv) 
-                    self._rec_extract_slim_ast(arg_json["loopExpression"], inherited_venv) 
-                    ret_obj = {
-                        "condition": self._rec_extract_slim_ast(arg_json["condition"], inherited_venv),
-                        "body": self._rec_extract_slim_ast(arg_json["body"], inherited_venv),
-                    }
-                elif arg_json["nodeType"] == "EmitStatement":
-                    # skip for now
-                    pass
-                elif arg_json["nodeType"] == "PlaceholderStatement":
-                    pass
-                elif arg_json["nodeType"] == "UsingForDirective":
-                    pass
-                elif arg_json["nodeType"] == "PragmaDirective":
-                    # skip this one, will return None
-                    pass
-                elif arg_json["nodeType"] == "EventDefinition":
-                    tmp_name = arg_json["name"]
-                    inherited_venv[tmp_name] = "<EVENT>"
-                else:
-                    raise NotImplementedError("Unsupported nodeType, got: {}.".format(arg_json["nodeType"]))
-            else:
-                raise NotImplementedError("Unsupported dictionary.")
-        else:
-            raise NotImplementedError("Unsupported type of json object, got: {}.".format(type(arg_json)))
-        
-        # determine whether the current object is worth returning or not
-        if ret_obj is None:
-            return None
-        elif isinstance(ret_obj, list):
-            ret_obj = list(filter(lambda x: x is not None, ret_obj))
-            if len(ret_obj)>0:
-                return ret_obj
-            else:
-                return None
-        elif isinstance(ret_obj, dict):
-            return ret_obj
-        elif isinstance(ret_obj, str):
-            return ret_obj
-        elif isinstance(ret_obj, tuple):
-            # for debugging: identifier type replacement
-            return ret_obj
-        else:
-            raise NotImplementedError("You should not have reached here; ret_obj type is: {}.".format(type(ret_obj)))
-
-    def slim_ast_to_igraph(self, arg_env, arg_slim_ast):
-        vtl, el, etl = [], [], []
-        # first prepare nodes in env also as igraph nodes
-        env_id_to_node_id = {} # e2n
-        env_id_to_ref_ids = {} # e2r
-        for dkey in arg_env.keys():
-            # tmp_id0 is the top/root node
-            tmp_id0 = self._rec_construct_edges_and_vertices(env_id_to_node_id, env_id_to_ref_ids, arg_env[dkey], vtl, el, etl)
-            env_id_to_node_id[dkey] = tmp_id0
-        
-        # then prepare nodes in slim ast
-        root_id = self._rec_construct_edges_and_vertices(env_id_to_node_id, env_id_to_ref_ids, arg_slim_ast, vtl, el, etl)
-        tmp_graph = igraph.Graph(
-            directed=True,
-            n=len(vtl), vertex_attrs={"token":vtl},
-            edges=el, edge_attrs={"token": etl},
-        )
-        return (env_id_to_node_id, env_id_to_ref_ids, tmp_graph, root_id)
-
-    # this operates in place
-    # returns the current vertex id
-    def _rec_construct_edges_and_vertices(self, e2n, e2r, arg_slim_ast, vertex_token_list, edge_list, edge_token_list):
-        # print("# processing: {}".format(arg_slim_ast))
-        if isinstance(arg_slim_ast, dict):
-            # print("dict-in")
-            tmp_vid0 = len(vertex_token_list)
-            vertex_token_list.append("<DICT>") # special token <DICT>
-            for dkey in arg_slim_ast.keys():
-                dcid = self._rec_construct_edges_and_vertices(
-                    e2n, e2r, arg_slim_ast[dkey], vertex_token_list, edge_list, edge_token_list
-                )
-                edge_token_list.append(dkey)
-                edge_list.append((tmp_vid0, dcid))
-                # reverse link (add if needed)
-                # edge_token_list.append(dkey)
-                # edge_list.append((dcid, tmp_vid0))
-            # print("dict-out")
-            return tmp_vid0
-        elif isinstance(arg_slim_ast, list):
-            # print("list-in")
-            tmp_vid0 = len(vertex_token_list)
-            vertex_token_list.append("<LIST>") # special token <LIST>
-            children_vertices = [
-                self._rec_construct_edges_and_vertices(e2n, e2r, arg_slim_ast[i], vertex_token_list, edge_list, edge_token_list)
-                for i in range(len(arg_slim_ast))
-            ]
-            for i in range(len(children_vertices)):
-                edge_token_list.append(i) # pure number index
-                edge_list.append((tmp_vid0, children_vertices[i])) # curr -> child
-                # reverse link (add if needed)
-                # edge_token_list.append(i)
-                # edge_list.append((i, tmp_vid0))
-            # print("list-out")
-            return tmp_vid0
-        elif isinstance(arg_slim_ast, str):
-            tmp_vid0 = len(vertex_token_list)
-            vertex_token_list.append(arg_slim_ast) # use its own value
-            # no children to add, just return
-            return tmp_vid0
-        elif isinstance(arg_slim_ast, tuple):
-            if arg_slim_ast[0] ==  "<IDENTIFIER>":
-                # seek from e2n and point to its real structure
-                assert arg_slim_ast[1] in e2n.keys(), "Identifier {} is not in e2n!".format(arg_slim_ast[1])
-
-                tmp_vid0 = len(vertex_token_list)
-                vertex_token_list.append("<ID>") # use a special value
-                edge_token_list.append("<REF>")
-                edge_list.append((tmp_vid0, e2n[arg_slim_ast[1]]))
-
-                # track the full list of node ids that bind to corresponding env ids
-                if arg_slim_ast[1] not in e2r.keys():
-                    e2r[arg_slim_ast[1]] = []
-                e2r[arg_slim_ast[1]].append(tmp_vid0)
-
-                return tmp_vid0
-            else:
-                raise NotImplementedError("Unsupported tuple, got: {}.".format(arg_slim_ast))
-        else:
-            raise NotImplementedError("Unsupported type of json object, got: {}.".format(arg_slim_ast))
 
     def get_action_mask(self, arg_type):
         # get action mask that allows for a specific type
@@ -741,18 +393,21 @@ class InvariantEnvironment(gym.Env):
         self.setup(self.config)
         self.curr_trinity_inv = HoleNode(type=self.start_type)
         self.curr_action_seq = []
+        tmp_action_seq_token, tmp_action_seq_node = self.observe_action_seq(self.curr_action_seq)
+        tmp_all_actions_token, tmp_all_actions_node = self.observe_action_seq(list(range(len(self.action_list))))
         return {
             "start": [1],
-            # "contract": self.contract_observed,
             "contract_id": [self.curr_contract_id],
             "action_mask": self.get_action_mask(self.start_type),
-            "nn_seq": self.pad_to_length(self.action_seq_to_nn_seq(self.curr_action_seq), self.max_step),
-            "all_actions": self.action_seq_to_nn_seq(list(range(len(self.action_list)))),
+            "action_seq@token_channel": self.pad_to_length(tmp_action_seq_token, self.max_step),
+            "action_seq@node_channel": self.pad_to_length(tmp_action_seq_node, self.max_step),
+            "all_actions@token_channel": self.pad_to_length(tmp_all_actions_token, self.max_step),
+            "all_actions@node_channel": self.pad_to_length(tmp_all_actions_node, self.max_step),
         }
 
     def check(self, arg_contract_path: str, arg_verifier_inv: str):
         ret = subprocess.run(
-            "liquidsol-exe {} --task check --check-inv '{}'".format(arg_contract_path, arg_verifier_inv),
+            "liquidsol-exe {} --task check --check-inv '{}' --only-last".format(arg_contract_path, arg_verifier_inv),
             shell=True, capture_output=True,
         )
         if ret.returncode != 0:
@@ -789,15 +444,18 @@ class InvariantEnvironment(gym.Env):
             print("# [debug][done/exception] contract: {}, seq: {}, inv(before): {}".format(
                 self.curr_contract_id, self.curr_action_seq, self.trinity_inv_to_debugging_inv(self.curr_trinity_inv),
             ))
+            tmp_action_seq_token, tmp_action_seq_node = self.observe_action_seq(self.curr_action_seq)
+            tmp_all_actions_token, tmp_all_actions_node = self.observe_action_seq(list(range(len(self.action_list))))
             return [
                 {
                     # you can't fill any hole since the seq terminates with an exception
                     "start": [1],
-                    # "contract": self.contract_observed,
                     "contract_id": [self.curr_contract_id],
                     "action_mask": [0 for _ in range(len(self.action_list))], 
-                    "nn_seq": self.pad_to_length(self.action_seq_to_nn_seq(self.curr_action_seq), self.max_step),
-                    "all_actions": self.action_seq_to_nn_seq(list(range(len(self.action_list)))),
+                    "action_seq@token_channel": self.pad_to_length(tmp_action_seq_token, self.max_step),
+                    "action_seq@node_channel": self.pad_to_length(tmp_action_seq_node, self.max_step),
+                    "all_actions@token_channel": self.pad_to_length(tmp_all_actions_token, self.max_step),
+                    "all_actions@node_channel": self.pad_to_length(tmp_all_actions_node, self.max_step),
                 }, 
                 0.0, # reward 
                 True, # terminate
@@ -893,14 +551,17 @@ class InvariantEnvironment(gym.Env):
                 tmp_terminate = False
                 tmp_reward = 0.1 * tmp_heuristic_multiplier * tmp_repeat_multiplier
 
+        tmp_action_seq_token, tmp_action_seq_node = self.observe_action_seq(self.curr_action_seq)
+        tmp_all_actions_token, tmp_all_actions_node = self.observe_action_seq(list(range(len(self.action_list))))
         return [
             {
                 "start": [1],
-                # "contract": self.contract_observed,
                 "contract_id": [self.curr_contract_id],
                 "action_mask": tmp_action_mask, 
-                "nn_seq": self.pad_to_length(self.action_seq_to_nn_seq(self.curr_action_seq), self.max_step),
-                "all_actions": self.action_seq_to_nn_seq(list(range(len(self.action_list)))),
+                "action_seq@token_channel": self.pad_to_length(tmp_action_seq_token, self.max_step),
+                "action_seq@node_channel": self.pad_to_length(tmp_action_seq_node, self.max_step),
+                "all_actions@token_channel": self.pad_to_length(tmp_all_actions_token, self.max_step),
+                "all_actions@node_channel": self.pad_to_length(tmp_all_actions_node, self.max_step),
             }, 
             tmp_reward, 
             tmp_terminate, 
