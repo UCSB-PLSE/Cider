@@ -34,21 +34,32 @@ SolInv/Venti inherits part of the [Trinity](https://github.com/fredfeng/Trinity)
 
 ```bash
 # run without gpu
-python ./example0.py
+python ./example0.py --expname exp0
 
 # run with gpu
-CUDA_VISIBLE_DEVICES=0 python ./example0.py --ngpu 1
+CUDA_VISIBLE_DEVICES=0 python ./example0.py --expname exp1026-0 --ngpu 1
 
 # tee
-CUDA_VISIBLE_DEVICES=0 python ./example0.py --ngpu 1 2>&1 | tee -a ./log.txt
+CUDA_VISIBLE_DEVICES=0 python ./example0.py --expname exp1028-contract0 --ngpu 1 2>&1 | tee -a ./exp1026-contract0.log
 
 # start tensorboard, port is 6006
 tensorboard --host 0.0.0.0 --logdir=~/ray_results
 ```
 
+## Usage
+
+```bash
+usage: example0.py [-h] [--ngpu NGPU] [--expname EXPNAME]
+
+optional arguments:
+  -h, --help         show this help message and exit
+  --ngpu NGPU        how many gpus are there for use, default: 0
+  --expname EXPNAME  the experiment name, default: temp
+```
+
 ## Design Notes
 
-#### Reward Design
+#### Reward Design (Outdated)
 
 ```
 # ================================ #
@@ -74,6 +85,9 @@ tensorboard --host 0.0.0.0 --logdir=~/ray_results
 - https://docs.ray.io/en/latest/rllib-training.html#getting-started
 - https://codepen.io/sosuke/pen/Pjoqqp
 - https://docs.aws.amazon.com/dlami/latest/devguide/tutorial-base.html
+- https://docs.ray.io/en/master/tune/user-guide.html#checkpointing
+- https://docs.ray.io/en/latest/tune/api_docs/execution.html
+- https://stackoverflow.com/questions/62241261/change-logdir-of-ray-rllib-training-instead-of-ray-results
 
 ## TODO's
 
@@ -83,6 +97,10 @@ tensorboard --host 0.0.0.0 --logdir=~/ray_results
 - ✓ Improve action masking to rule out redundant flex actions.
 - ✓ Enable GPU support.
 - ✓ Need more efficient network computation to speed up in GPU mode, the current computation is not efficient enough: profiling of which procedure takes longest (for-loop, graph comp., or other).
+- ✓ Cache contract representation **<u>*within*</u>** one single `forward` call to speed up computation.
+- ✓ Only invariants that pass all the constraints will have no repeat multiplier, but some contracts have ground truth invariants that do not pass all soft constraints.
+  - ✓ Current reward can't tell apart sub-optimal invariants (those with all hard constarints satisfied but some soft constraints not satisfied).
+  - ✓ Add baseline scoring system to avoid proposing stupid invariant.
 - ▢ Switch to a more precise DSL.
 - ▢ Check and set a proper `max_step` in training.
 
