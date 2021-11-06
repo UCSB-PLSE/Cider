@@ -6,6 +6,7 @@ from .expr import *
 from .parser import Visitor_Recursive
 from .utils import enum_set_domain
 from ..logger import get_logger
+from .sort import INT, BOOL, ANY, BOTTOM, Map
 
 logger = get_logger('tyrell.desugar')
 
@@ -48,13 +49,14 @@ class TypeCollector(Visitor_Recursive):
         return ret
 
     def value_decl(self, tree):
-        name = tree.children[0]
+        name = tree.children[0].value
         properties = self._process_properties(tree.children[1].children)
-        try:
-            self._spec.define_type(ValueType(name, properties))
-        except ValueError as e:
-            # Handle duplicated property name
-            raise ParseTreeProcessingError('{}'.format(e))
+        for sort in [BOTTOM] + list(map(ProductionCollector._process_sort, tree.children[2].children)):
+            try:
+                self._spec.define_type(ValueType(name, properties, sort))
+            except ValueError as e:
+                # Handle duplicated property name
+                raise ParseTreeProcessingError('{}'.format(e))
 
     def collect(self) -> TypeSpec:
         return self._spec
@@ -90,10 +92,31 @@ class ProductionCollector(Visitor_Recursive):
     def __init__(self, type_spec):
         self._type_spec = type_spec
         self._prod_spec = ProductionSpec()
+    
+    @staticmethod
+    def _process_sort(tree):
+        if tree.data == 's_bool':
+            return BOOL
+        elif tree.data == 's_int':
+            return INT
+        elif tree.data == 's_any':
+            return ANY
+        elif tree.data == 's_map':
+            assert(len(tree.children) == 1)
+            return Map(ProductionCollector._process_sort(tree.children[0]))
+        else:
+            raise ParseTreeProcessingError("Unknown sort: " + str(tree))
 
     @staticmethod
     def _process_opt_arg(opt_arg):
-        return str(opt_arg.children[0])
+        # this is likely buggy, since there's no guarantee that
+        # sort is at this position
+        if len(opt_arg.children) >= 2:
+            tree_sort = opt_arg.children[1]
+            sort = ProductionCollector._process_sort(tree_sort)
+        else:
+            sort = BOTTOM
+        return str(opt_arg.children[0]), sort
 
     @staticmethod
     def _create_index_map(opt_args):
@@ -220,13 +243,12 @@ class ProductionCollector(Visitor_Recursive):
     def func_decl(self, tree):
         name = str(tree.children[0])
         tree_body = tree.children[1]
-        lhs_name = self._process_opt_arg(tree_body.children[0])
-        rhs_names = [self._process_opt_arg(x)
-                     for x in tree_body.children[1].children]
+        lhs_name, lhs_sort = self._process_opt_arg(tree_body.children[0])
+        rhs_names_sorts = [self._process_opt_arg(x) for x in tree_body.children[1].children]
         index_map = self._create_index_map(
             [tree_body.children[0]] + tree_body.children[1].children)
-        lhs = self._type_spec.get_type_or_raise(lhs_name)
-        rhs = [self._type_spec.get_type_or_raise(x) for x in rhs_names]
+        lhs = self._type_spec.get_type_or_raise(lhs_name, lhs_sort)
+        rhs = [self._type_spec.get_type_or_raise(n,s) for n,s in rhs_names_sorts]
         type_map = self._create_type_map([lhs] + rhs)
         constraints = [self._process_expr(index_map, type_map,
                                           x) for x in tree.children[2].children]

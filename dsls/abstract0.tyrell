@@ -3,7 +3,7 @@ enum EnumExpr {
     "<VAR0>", "<VAR1>", "<VAR2>", "<VAR3>", "<VAR4>", "<VAR5>", "<VAR6>", "<VAR7>", "<VAR8>", "<VAR9>", "0"
 }
 
-value Expr;
+value Expr <'a | bool | int | map(int) | map('a) | map(map('a))>;
 value Empty;
 
 # Next, specify the input/output of the synthesized program
@@ -12,10 +12,10 @@ program Generate() -> Expr;
 # Finally, specify the production rules
 func empty: Empty -> Empty;
 
-func enum2expr: Expr -> EnumExpr;
+func enum2expr: Expr <'a> -> EnumExpr <'a>;
 
-func and: Expr -> Expr, Expr;
-func leq: Expr -> Expr, Expr;
-func add: Expr -> Expr, Expr;
-func flatten: Expr -> Expr;
-func sum: Expr -> Expr;
+func and: Expr <bool> -> Expr <bool>, Expr <bool>;
+func leq: Expr <bool> -> Expr <int>, Expr <int>;
+func add: Expr <int> -> Expr <int>, Expr <int>;
+func sum: Expr <int> -> Expr <map(int)>;
+func flatten: Expr <map('a)> -> Expr <map(map('a))>;

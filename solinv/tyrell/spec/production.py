@@ -2,6 +2,7 @@ from typing import List, Any, cast
 from abc import ABC, abstractmethod
 from .type import Type, EnumType, ValueType
 from .expr import Expr, ExprType
+from .sort import Sort
 
 
 class Production(ABC):
@@ -21,10 +22,22 @@ class Production(ABC):
     @property
     def id(self) -> int:
         return self._id
+    
+    def __eq__(self, other) -> bool:
+        return self._id == other._id
+    
+    def __ge__(self, other) -> bool:
+        return self._id >= other._id
+    
+    def __hash__(self) -> int:
+        return self._id
 
     @property
     def lhs(self) -> Type:
         return self._lhs
+    
+    def set_lhs_sort(self, sort: Sort):
+        self._lhs._sort = sort
 
     @property
     @abstractmethod

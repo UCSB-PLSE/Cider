@@ -15,9 +15,12 @@ enum_set_decl: "enumset" type_name "[" INT "]" enum_body
 
 enum_items: enum_item ("," enum_item)*
 
-value_decl: "value" type_name value_body
+value_decl: "value" type_name value_body value_sorts
 
-?value_body: ";"
+value_sorts: ";"
+  | "<" sort ("|" sort)* ">" ";"
+
+?value_body:
   | "{" value_items "}"
 
 value_items: value_item value_item*
@@ -38,7 +41,13 @@ func_rhss: func_rhs ("," func_rhs)*
 
 ?func_rhs: opt_arg
 
-opt_arg: type_name [var_name]
+opt_arg: type_name [var_name] ["<" sort ">"]
+
+sort: "'a" -> s_any
+  | "int" -> s_int
+  | "bool"  -> s_bool
+  | "map" "(" sort ")" -> s_map
+
 
 ?func_constraints: ";"
   | "{" func_constraint_items "}"

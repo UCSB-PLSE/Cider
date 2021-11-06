@@ -15,6 +15,7 @@ from ray.tune.logger import pretty_print, UnifiedLogger
 # trinity related utils
 import solinv.tyrell.spec as S
 import solinv.tyrell.dsl as D
+from solinv.tyrell.spec import sort
 from solinv.tyrell.interpreter import InvariantInterpreter
 from solinv.environment import InvariantEnvironment
 from solinv.model import InvariantTGN, InvariantGCN, TestNN
@@ -39,7 +40,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     spec = S.parse_file("./dsls/abstract0.tyrell")
-    start_type = spec.get_type("Expr")
+    start_type = spec.get_type("Expr", sort.BOOL)
     interpreter = InvariantInterpreter()
     env_config = {
         "spec": spec,
@@ -66,21 +67,21 @@ if __name__ == "__main__":
             # stovars: 8
             # Hard: 77 / 77
             # Soft: 10 / 11
-            ("./benchmarks/easy/0x6704b673c70de9bf74c8fba4b4bd748f0e2190e1.sol", "0.4.26"), 
+            # ("./benchmarks/easy/0x6704b673c70de9bf74c8fba4b4bd748f0e2190e1.sol", "0.4.26"), 
 
             # 2. sum(balances) <= totalSupply
             # liquidsol-exe ./benchmarks/easy/0x6745fab6801e376cd24f03572b9c9b0d4edddccf.sol --task check --check-inv 'sum(balances) <= totalSupply' --only-last
             # stovars: 8
             # Hard: 69 / 69
             # Soft: 3 / 8
-            ("./benchmarks/easy/0x6745fab6801e376cd24f03572b9c9b0d4edddccf.sol", "0.4.26"), 
+            # ("./benchmarks/easy/0x6745fab6801e376cd24f03572b9c9b0d4edddccf.sol", "0.4.26"), 
 
             # 3. sum(balances) <= totalSupply
             # liquidsol-exe ./benchmarks/easy/0x9041fe5b3fdea0f5e4afdc17e75180738d877a01.sol --task check --check-inv 'sum(balances) <= totalSupply' --only-last
             # stovars: 7
             # Hard: 29 / 29
             # Soft: 4 / 5
-            ("./benchmarks/easy/0x9041fe5b3fdea0f5e4afdc17e75180738d877a01.sol", "0.4.26"), 
+            # ("./benchmarks/easy/0x9041fe5b3fdea0f5e4afdc17e75180738d877a01.sol", "0.4.26"), 
 
             # ("./benchmarks/easy/0x5e6016ae7d7c49d347dcf834860b9f3ee282812b.sol", "0.4.26"), # stovars: 21
             # ("./benchmarks/easy/0x286BDA1413a2Df81731D4930ce2F862a35A609fE.sol", "0.4.26"), # stovars: 11

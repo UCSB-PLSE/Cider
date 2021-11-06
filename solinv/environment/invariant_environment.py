@@ -6,6 +6,7 @@ import subprocess
 import random
 import torch
 import numpy as np
+from collections import defaultdict
 from typing import List, Any, Union, Dict
 
 import gym
@@ -13,6 +14,7 @@ import igraph
 from gym.utils import seeding
 
 from ..tyrell import spec as S
+from ..tyrell.spec import sort
 from ..tyrell import dsl as D
 from ..tyrell.interpreter import InvariantInterpreter
 from ..tyrell.dsl import Node, HoleNode
@@ -22,6 +24,8 @@ from .invariant_heuristic import InvariantHeuristic
 from .error import EnvironmentError
 
 from .soltype_ast import get_soltype_ast, soltype_ast_to_igraph, insert_padding_node, add_reversed_edges
+
+from ..tyrell.spec import sort
 
 class InvariantEnvironment(gym.Env):
     # note: class static variable
@@ -51,6 +55,7 @@ class InvariantEnvironment(gym.Env):
             lambda x: not(x.is_enum() and "<VAR" in x._get_rhs()),
             self.action_list,
         ))
+        self.fixed_action_list[-1].set_lhs_sort(sort.INT) # last fixed action is EnumType -> 0
         self.fixed_action_dict = {self.fixed_action_list[i]:i for i in range(len(self.fixed_action_list))}
         # a flex action is bounded with a stovar dynamically for different benchmarks
         self.flex_action_list = list(filter(
@@ -172,6 +177,8 @@ class InvariantEnvironment(gym.Env):
             self.flex_action_to_stovar = cached["flex_action_to_stovar"]
             self.stovar_to_flex_action = cached["stovar_to_flex_action"]
             self.contract_baseline_scores = cached["contract_baseline_scores"]
+            self.action_masks = cached["action_masks"]
+            self.shadow_actions = cached["shadow_actions"]
         else:
             # need to start a new process
 
@@ -222,14 +229,24 @@ class InvariantEnvironment(gym.Env):
             }
 
             # get stovars list
-            self.stovar_list = self.get_contract_stovars(self.contract_path)
+            self.stovar_list, self.stovar_sorts = zip(*self.get_contract_stovars(self.contract_path))
             self.stovar_dict = {self.stovar_list[i]:i for i in range(len(self.stovar_list))}
             # check for enough var production rules in the dsl
+            enum_expr = self.tspec.get_type("EnumExpr", sort.ANY)
             for i in range(len(self.stovar_list)):
-                _ = self.tspec.get_enum_production_or_raise(self.tspec.get_type("EnumExpr"), "<VAR{}>".format(i))
+                _ = self.tspec.get_enum_production_or_raise(enum_expr, "<VAR{}>".format(i))
+            # update types of used vars
+            for i in range(len(self.stovar_list)):
+                s = self.stovar_sorts[i]
+                p = self.tspec.get_enum_production_or_raise(enum_expr, "<VAR{}>".format(i))
+                p.set_lhs_sort(s)
+            # change unused EnumExpr's sort from ANY to BOTTOM
+            for p in self.tspec.productions():
+                if isinstance(p.lhs, S.type.EnumType) and p.lhs.sort == sort.ANY:
+                    p.set_lhs_sort(sort.BOTTOM)
             # establish the flex-stovar bindings
             self.flex_action_to_stovar = {
-                self.tspec.get_enum_production_or_raise(self.tspec.get_type("EnumExpr"), "<VAR{}>".format(i)) : self.stovar_list[i]
+                self.tspec.get_enum_production_or_raise(enum_expr, "<VAR{}>".format(i)) : self.stovar_list[i]
                 for i in range(len(self.stovar_list))
             }
             self.stovar_to_flex_action = { self.flex_action_to_stovar[dkey]:dkey for dkey in self.flex_action_to_stovar.keys() }
@@ -239,12 +256,21 @@ class InvariantEnvironment(gym.Env):
             self.contract_baseline_scores = self.check(self.contract_path, "true", arg_silent_mode=True)
             # note: do you need to assert the inferiority of the scores of baseline?
 
+            self.action_masks = self.compute_action_masks()
+            self.shadow_actions = self.get_shadow_actions()
+
             print("# ======")
             print("# contract: {}\n# e2n: {}\n# e2r: {}\n# root: {}\n# num_nodes: {}\n# num_edges: {}\n# baseline scores: {}".format(
                 self.contract_path, self.contract_e2n, self.contract_e2r, self.contract_root_id,
                 len(self.contract_igraph.vs), len(self.contract_igraph.es),
                 self.contract_baseline_scores
             ))
+            print("# start type:", self.start_type)
+            print("# stovars:", ", ".join(self.stovar_list))
+            print("# action masks:")
+            # self.print_action_masks()
+            for t, mask in self.action_masks.items():
+                print(t, mask)
             print("# ======")
 
             # store to cache
@@ -265,6 +291,8 @@ class InvariantEnvironment(gym.Env):
             cached["flex_action_to_stovar"] = self.flex_action_to_stovar
             cached["stovar_to_flex_action"] = self.stovar_to_flex_action
             cached["contract_baseline_scores"] = self.contract_baseline_scores
+            cached["action_masks"] = self.action_masks
+            cached["shadow_actions"] = self.shadow_actions
 
         # ====== #
         # basics #
@@ -313,7 +341,7 @@ class InvariantEnvironment(gym.Env):
         return tmp_inv
 
     def trinity_inv_to_verifier_inv(self, arg_trinity_inv):
-        # verifier inv will be the string that is diredtly provided to the verifier
+        # verifier inv will be the string that is directly provided to the verifier
         tmp_inv0 = self.interpreter.eval(arg_trinity_inv)
         tmp_inv1 = self.trinity_inv_to_debugging_inv(tmp_inv0) # compatible reuse
         return tmp_inv1
@@ -345,7 +373,7 @@ class InvariantEnvironment(gym.Env):
         return parsed_json
 
     def get_contract_stovars(self, arg_path):
-        cmd_sto = subprocess.run("liquidsol-exe {} --task vars".format(arg_path), shell=True, capture_output=True)
+        cmd_sto = subprocess.run("liquidsol-exe {} --task vars --only-last".format(arg_path), shell=True, capture_output=True)
         assert(cmd_sto.returncode == 0)
         raw_output = cmd_sto.stdout.decode("utf-8")
         lines = raw_output.rstrip().split("\n")
@@ -360,24 +388,101 @@ class InvariantEnvironment(gym.Env):
         for j in range(len(break_points)-1):
             curr_lines = lines[break_points[j]+1:break_points[j+1]]
             assert(len(curr_lines) % 2 == 0)
-            n = len(curr_lines) // 2
-            for i in range(n):
-                tmp_list.append(curr_lines[i])
+            names = curr_lines[:len(curr_lines)//2]
+            sorts = [sort.parse(s) for s in curr_lines[len(curr_lines)//2:]]
+            tmp_list.extend(zip(names, sorts))
         # fixme: remove duplicate, this is not super appropriate
         tmp_list = list(set(tmp_list))
         # print("# number of stovars: {}, stovars are: {}".format(len(tmp_list), tmp_list))
         return tmp_list
+    
+    def compute_action_masks(self):
+        paths = defaultdict(set)
+        ps = []
+        for p in self.action_list:
+            if p.lhs.is_enum():
+                if p.lhs.sort != sort.BOTTOM:
+                    paths[p.lhs].add(p)
+            else:
+                ps.append(p)
+
+        def print_paths(paths):
+            print('# ===')
+            for t in paths:
+                print(t)
+                for p in paths[t]:
+                    print(p)
+                    print('# ---')
+            print('# ===')
+    
+        # for p in ps:
+            # print(p.lhs, "->", ", ".join(map(str, p.rhs)))
+
+        while True:
+            change = False
+            for p in ps:
+                sigmas = []
+                for ta in p.rhs:
+                    for tc in paths:
+                        if tc <= ta and len(paths[tc]) > 0 and p not in paths[tc]:
+                            sigmas.append(ta.subsume(tc))
+                if len(sigmas) == 0: continue
+                for sigma in sigmas:
+                    rhs_concrete = [ta.subst(sigma) for ta in p.rhs]
+                    lhs_concrete = p.lhs.subst(sigma)
+                    # print(lhs_concrete, "->", ", ".join(map(str, rhs_concrete)))
+                    # print()
+                    if all([len(paths[t]) > 0 for t in rhs_concrete]) and p not in paths[lhs_concrete]:
+                        paths[lhs_concrete].add(p)
+                        change = True
+            if not change:
+                break
+        
+        # print_paths(paths)
+        action_list = self.fixed_action_list + self.flex_action_list
+        masks = defaultdict(lambda: [0 for _ in range(len(action_list))])
+        for t in paths:
+            mask = [int(p in paths[t]) for p in action_list]
+            masks[t] = mask
+        return masks
+
+    def print_action_masks(self):
+        for t, mask in self.action_masks.items():
+            mask_str = ", ".join([
+                self.action_list[i].name if \
+                    isinstance(self.action_list[i], S.production.FunctionProduction) else \
+                        (self.stovar_list[i-len(self.fixed_action_list)] if i >= len(self.fixed_action_list) else "0") \
+                for i in range(len(mask)) if mask[i] > 0])
+            print("{:<30} {}".format(str(t), mask_str))
 
     def get_action_mask(self, arg_type):
         # get action mask that allows for a specific type
-        # also mask out redundant variable productions
-        tmp_fixed_mask = [1 if arg_type == p.lhs else 0 for p in self.fixed_action_list]
-        tmp_flex_mask = [
-            1 if i < len(self.stovar_list) and arg_type == self.flex_action_list[i].lhs else 0 
-            for i in range(len(self.flex_action_list))
-        ]
-        # the order is: action_list = fixed_action_list + flex_action_list
-        return tmp_fixed_mask + tmp_flex_mask
+        return self.action_masks[arg_type]
+    
+    def get_shadow_actions(self):
+        from copy import deepcopy
+        shadow_ps = dict()
+        sorts = set()
+        for p in self.action_list:
+            if p.lhs.sort.is_concrete():
+                sorts.add(p.lhs.sort)
+                sorts |= set([r.sort for r in p.rhs if isinstance(r, S.type.Type)])
+        for p in self.action_list:
+            if not p.lhs.sort.is_concrete():
+                if p not in shadow_ps:
+                    shadow_ps[p] = dict()
+                for s in sorts:
+                    if not s <= p.lhs.sort: continue
+                    p0 = deepcopy(p)
+                    e0 = deepcopy(p.lhs)
+                    e0._sort = s
+                    sigma = p0.lhs.subsume(e0)
+                    p0._lhs = p0.lhs.subst(sigma)
+                    p0._rhs = [t.subst(sigma) for t in p0.rhs]
+                    shadow_ps[p][s] = p0
+                    # print("shadow: {} / {} -> {}".format(p, s, p0))
+        return shadow_ps
+
 
     def is_max(self):
         '''
@@ -448,32 +553,40 @@ class InvariantEnvironment(gym.Env):
         if self.is_done():
             raise EnvironmentError("the invariant is already complete; no action is required.")
 
+        
         # perform the action: derive method will raise exceptions by itself
-        try:
-            sts, new_inv = derive_dfs(self.builder, self.curr_trinity_inv, self.action_list[arg_action_id])
-        except:
-            # Exception: Types don't match, expect Empty, got Expr
-            self.curr_action_seq = self.curr_action_seq + [arg_action_id]
-            print("# [debug][done/exception] contract: {}, seq: {}, inv(before): {}".format(
-                self.curr_contract_id, self.curr_action_seq, self.trinity_inv_to_debugging_inv(self.curr_trinity_inv),
-            ))
-            tmp_action_seq_token, tmp_action_seq_node = self.observe_action_seq(self.curr_action_seq)
-            tmp_all_actions_token, tmp_all_actions_node = self.observe_action_seq(list(range(len(self.action_list))))
-            return [
-                {
-                    # you can't fill any hole since the seq terminates with an exception
-                    "start": [1],
-                    "contract_id": [self.curr_contract_id],
-                    "action_mask": [0 for _ in range(len(self.action_list))], 
-                    "action_seq@token_channel": self.pad_to_length(tmp_action_seq_token, self.max_step),
-                    "action_seq@node_channel": self.pad_to_length(tmp_action_seq_node, self.max_step),
-                    "all_actions@token_channel": self.pad_to_length(tmp_all_actions_token, self.max_step),
-                    "all_actions@node_channel": self.pad_to_length(tmp_all_actions_node, self.max_step),
-                }, 
-                0.0, # reward 
-                True, # terminate
-                {}, # info
-            ]
+        # try:
+        p = self.action_list[arg_action_id]
+        if not p.lhs.sort.is_concrete():
+            hole = get_hole_dfs(self.curr_trinity_inv)
+            p = self.shadow_actions[p][hole.type.sort]
+        # try:
+        # print("# [debug] contract: {}, curr_inv: {}, action: {}".format(self.curr_contract_id, self.curr_trinity_inv, p))
+        sts, new_inv = derive_dfs(self.builder, self.curr_trinity_inv, p)
+        # print("# [debug] contract: {}, new_inv: {}".format(self.curr_contract_id, new_inv))
+        # except:
+        #     # Exception: Types don't match, expect Empty, got Expr
+        #     self.curr_action_seq = self.curr_action_seq + [arg_action_id]
+        #     print("# [debug][done/exception] contract: {}, seq: {}, inv(before): {}".format(
+        #         self.curr_contract_id, self.curr_action_seq, self.trinity_inv_to_debugging_inv(self.curr_trinity_inv),
+        #     ))
+        #     tmp_action_seq_token, tmp_action_seq_node = self.observe_action_seq(self.curr_action_seq)
+        #     tmp_all_actions_token, tmp_all_actions_node = self.observe_action_seq(list(range(len(self.action_list))))
+        #     return [
+        #         {
+        #             # you can't fill any hole since the seq terminates with an exception
+        #             "start": [1],
+        #             "contract_id": [self.curr_contract_id],
+        #             "action_mask": [0 for _ in range(len(self.action_list))], 
+        #             "action_seq@token_channel": self.pad_to_length(tmp_action_seq_token, self.max_step),
+        #             "action_seq@node_channel": self.pad_to_length(tmp_action_seq_node, self.max_step),
+        #             "all_actions@token_channel": self.pad_to_length(tmp_all_actions_token, self.max_step),
+        #             "all_actions@node_channel": self.pad_to_length(tmp_all_actions_node, self.max_step),
+        #         }, 
+        #         0.0, # reward 
+        #         True, # terminate
+        #         {}, # info
+        #     ]
 
         if not sts:
             raise EnvironmentError("node is not expanded, check the implementation")

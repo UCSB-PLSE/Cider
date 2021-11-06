@@ -1,19 +1,26 @@
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from typing import List, Dict, Tuple, Optional, Any
 from .expr import ExprType
-
+from .sort import Sort, ANY
 
 class Type(ABC):
     '''A generic class for types in DSL'''
     _name: str
+    _sort: Optional[Sort]
 
     @abstractmethod
-    def __init__(self, name: str):
+    def __init__(self, name: str, sort: Optional[Sort] = None):
         self._name = name
+        self._sort = sort
 
     @property
     def name(self) -> str:
         return self._name
+    
+    @property
+    def sort(self) -> Optional[Sort]:
+        return self._sort
 
     @abstractmethod
     def is_enum(self) -> bool:
@@ -24,17 +31,36 @@ class Type(ABC):
         raise NotImplementedError
 
     def __str__(self) -> str:
-        return self._name
+        if self._sort:
+            return f"{self._name} <{self._sort}>"
+        else:
+            return self._name
 
     def __eq__(self, other):
         """Overrides the default implementation"""
         if isinstance(other, Type):
-            return self._name == other._name
+            return self._name == other._name and self._sort == other._sort
         return NotImplemented
+    
+    def subsume(self, other):
+        if isinstance(other, Type):
+            if self._name == other._name:
+                return self._sort.subsume(other._sort)
+            else:
+                return None
+        return NotImplemented
+    
+    def __ge__(self, other):
+        return self.subsume(other) is not None
+    
+    def subst(self, any_for: Sort) -> 'Type':
+        this = deepcopy(self)
+        this._sort = this._sort.subst(any_for)
+        return this
 
     def __hash__(self):
         """Overrides the default implementation"""
-        return hash(self._name)
+        return hash((self._name, self._sort))
 
 
 class EnumType(Type):
@@ -43,7 +69,7 @@ class EnumType(Type):
     _domain: List[Any]
 
     def __init__(self, name: str, domain: List[Any] = []):
-        super().__init__(name)
+        super().__init__(name, ANY)
         self._domain = domain
 
     @property
@@ -63,8 +89,8 @@ class EnumType(Type):
 class ValueType(Type):
     _properties: Dict[str, ExprType]
 
-    def __init__(self, name: str, properties: List[Tuple[str, ExprType]] = []):
-        super().__init__(name)
+    def __init__(self, name: str, properties: List[Tuple[str, ExprType]] = [], sort: Optional[Sort] = None):
+        super().__init__(name, sort)
         self._properties = dict()
         for name, ty in properties:
             if name in self._properties:

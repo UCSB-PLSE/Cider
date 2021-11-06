@@ -1,0 +1,9 @@
+start: s
+
+s : "address" -> int
+  | "uint256" -> int
+  | "uint8"   -> int
+  | "mapping(" s "=>" s ")" -> mapping
+
+%import common.WS
+%ignore WS

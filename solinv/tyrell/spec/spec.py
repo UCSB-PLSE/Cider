@@ -1,9 +1,12 @@
-from typing import Iterable, List, Dict, DefaultDict, Optional, Union, Any
+from copy import deepcopy
+from typing import Iterable, List, Tuple, Dict, DefaultDict, Optional, Union, Any
 from collections import defaultdict
 from .type import Type, EnumType, ValueType
 from .production import EnumProduction, ParamProduction, FunctionProduction, Production
 from .expr import Expr
 from .predicate import Predicate
+from .sort import Sort, BOTTOM
+
 
 
 class TypeSpec:
@@ -12,19 +15,19 @@ class TypeSpec:
     def __init__(self):
         self._types = dict()
 
-    def get_type(self, name: str) -> Optional[Type]:
+    def get_type(self, name: str, sort: Sort = BOTTOM) -> Optional[Type]:
         '''
         Return the type associated with `name`, if it is defined.
         If the type has not been defined, return `None`
         '''
-        return self._types.get(name)
+        return self._types.get((name, sort))
 
-    def get_type_or_raise(self, name: str) -> Type:
+    def get_type_or_raise(self, name: str, sort: Sort = BOTTOM) -> Type:
         '''
         Return the type associated with `name`, if it is defined.
         If the type has not been defined, raise `KeyError`
         '''
-        return self._types[name]
+        return self._types[(name, sort)]
 
     def define_type(self, ty: Type) -> Type:
         '''
@@ -32,12 +35,13 @@ class TypeSpec:
         Raise `ValueError` if another type with duplicated name is found.
         '''
         name = ty.name
-        if name in self._types:
+        sort = ty.sort
+        if (name, sort) in self._types:
             raise ValueError(
                 'The type has already been defined in the Tyrell spec: {}'
                 .format(ty))
         else:
-            self._types[name] = ty
+            self._types[(name, sort)] = ty
         return ty
 
     def types(self) -> Iterable[Type]:
@@ -54,7 +58,7 @@ class TypeSpec:
 
 class ProductionSpec:
     _productions: List[Production]
-    _lhs_map: DefaultDict[str, List[Production]]
+    _lhs_map: DefaultDict[Tuple[str,Sort], List[Production]]
     _param_map: Dict[int, Production]
     _func_map: Dict[str, Production]
 
@@ -82,18 +86,16 @@ class ProductionSpec:
             msg = 'Cannot find production with given id: {}'.format(id)
             raise KeyError(msg)
 
-    def _get_productions_with_lhs(self, lhs: str) -> List[Production]:
-        return self._lhs_map.get(lhs, [])
+    def _get_productions_with_lhs(self, lhs: str, sort: Sort) -> List[Production]:
+        return self._lhs_map.get((lhs, sort), [])
 
-    def get_productions_with_lhs(self, ty: Union[str, Type]) -> List[Production]:
+    def get_productions_with_lhs(self, ty: Type) -> List[Production]:
         '''
         Return the productions whose LHS is `ty`, where `ty` can be a Type or a string representing the name of the type
         If no production is found, or `ty` is not a string or a Type, return an empty list
         '''
         if isinstance(ty, Type):
-            return self._get_productions_with_lhs(ty.name)
-        elif isinstance(ty, str):
-            return self._get_productions_with_lhs(ty)
+            return self._get_productions_with_lhs(ty.name, ty.sort)
         else:
             return []
 
@@ -170,14 +172,14 @@ class ProductionSpec:
 
     def _add_production(self, prod: Production) -> None:
         self._productions.append(prod)
-        self._lhs_map[prod.lhs.name].append(prod)
+        self._lhs_map[(prod.lhs.name, prod.lhs.sort)].append(prod)
 
     def add_enum_production(self, lhs: EnumType, choice: int) -> EnumProduction:
         '''
         Create a new enum production. Return the created production.
         Raise `ValueError` if `choice` is out of bound.
         '''
-        prod = EnumProduction(self._get_next_id(), lhs, choice)
+        prod = EnumProduction(self._get_next_id(), deepcopy(lhs), choice)
         self._add_production(prod)
         return prod
 
@@ -318,11 +320,11 @@ class TyrellSpec:
             prod_spec.add_param_production(ty, i)
 
     # Delegate methods for TypeSpec
-    def get_type(self, name: str) -> Optional[Type]:
-        return self._type_spec.get_type(name)
+    def get_type(self, name: str, sort: Sort = BOTTOM) -> Optional[Type]:
+        return self._type_spec.get_type(name, sort)
 
-    def get_type_or_raise(self, name: str) -> Type:
-        return self._type_spec.get_type_or_raise(name)
+    def get_type_or_raise(self, name: str, sort: Sort = BOTTOM) -> Type:
+        return self._type_spec.get_type_or_raise(name, sort)
 
     def types(self):
         return self._type_spec.types()

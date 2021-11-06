@@ -30,7 +30,8 @@ class Builder:
         self._spec = spec
 
     def _make_node(self, prod: Production, children: List[Node] = [], **kwargs) -> Node:
-        return ProductionVisitor(children).visit(prod, **kwargs)
+        visitor = ProductionVisitor(children)
+        return visitor.visit(prod, **kwargs)
 
     def make_node(self, src: Union[int, Production], children: List[Node] = [], **kwargs) -> Node:
         '''
@@ -45,7 +46,8 @@ class Builder:
             if src != prod:
                 raise ValueError(
                     'DSL Builder found inconsistent production instance')
-            return self._make_node(prod, children, **kwargs)
+            # use src instead of prod, since it is guaranteed to be concrete
+            return self._make_node(src, children, **kwargs)
         else:
             raise ValueError(
                 'make_node() only accepts int or production, but found {}'.format(src))
