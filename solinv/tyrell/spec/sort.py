@@ -1,10 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Final, Optional
 
 class Sort(ABC):
     """Generic type"""
     
-    _name: Final[str] # unique name of the type
+    _name: str # unique name of the type
 
     @abstractmethod
     def __init__(self, name: str):
@@ -99,6 +98,7 @@ class Bool(Base):
 class Bottom(Base):
     def __init__(self):
         super().__init__("bottom")
+
 
 class Map(Sort):
     _into: Sort
