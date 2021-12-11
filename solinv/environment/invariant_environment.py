@@ -1,6 +1,4 @@
-import re
 import copy
-import json
 import pickle
 import subprocess
 import random
@@ -23,9 +21,12 @@ from ..tyrell.dsl.utils import derive_dfs, get_hole_dfs
 from .invariant_heuristic import InvariantHeuristic
 from .error import EnvironmentError
 
-from .soltype_ast import get_soltype_ast, soltype_ast_to_igraph, insert_padding_node, add_reversed_edges
+from .soltype_ast import get_soltype_graph, insert_padding_node, add_reversed_edges, soltype_edge_tokens, soltype_vertex_tokens
 
 from ..tyrell.spec import sort
+from .svgraph import StoVarGraph
+from .solid import Solid
+from .contract import Contract
 
 def nonzero(xs):
     return [i for i, x in enumerate(xs) if x != 0]
@@ -47,6 +48,7 @@ class InvariantEnvironment(gym.Env):
         self.max_step = config["max_step"]
         self.interpreter = config["interpreter"]
         self.is_test = is_test
+        self.solid = Solid()
 
         # ================== #
         # vocabulary related #
@@ -54,47 +56,12 @@ class InvariantEnvironment(gym.Env):
         # solType slim AST tokens
         self.special_token_list = ["<PAD>", "<ID>", "<REF>"]
         self.reserved_identifier_token_list = [] # TODO: populate this
-        self.reserved_vertex_token_list = sorted([
-            '<CONTRACT>',
-            # expressions
-            '<VAR>',
-            'CInt', 'CBool', 'CArrZero',
-            "Unary_not", "!=", ">=", "<=", ">", "<", "==", "||", "&&", 
-            "+", "-",  "*", "/", "%", "**",
-            "+=", "-=", "*=", "/=",
-            'EMapInd', 'EField', 'EHavoc',
-            # lvalues
-            'LvInd', 'LvFld',
-            # statements
-            'SAsn', 'SCall', 'SDecl', 'SIf', 'SReturn', 'SWhile', 'SHavoc', 'SAbort',
-            # declarations
-            'DCtor',
-            'DFun', 'DFun_arg',
-            'DStruct',
-            # types
-            'TyMapping', 'TyStruct', 'TyArray', 'TyAddress', 'TyInt', 'TyInt32', 'TyInt64', 'TyInt120', 'TyInt256', 'TyBool', 'TyByte'])
-        self.reserved_edge_token_list = sorted([
-            # expressions
-            'Var_name', 'Unary_e', 'Binary_lhs', 'Binary_rhs', 
-            'EField_fld', 'EField_struct', 'EMapInd_ind', 'EMapInd_map', 
-            # lvalues
-            'LvFld_fld', 'LvFld_struct', 'LvInd_ind', 'LvInd_map', 
-            # statements
-            'SAsn_lhs', 'SAsn_rhs', 'SCall_args', 'SCall_args_first', 'SCall_args_next', 'SCall_name', 
-            'SIf_cond', 'SIf_else', 'SIf_then', 'SIf_then_first', 'SIf_then_next', 'SIf_else_first', 'SIf_else_next',
-            'SWhile_cond', 'SWhile_body_first', 'SWhile_body_next',
-            # declarations
-            'DCtor_args', 'DCtor_body', 
-            'DFun_args', 'DFun_body', 'DFun_name',
-            'DFun_args_first', 'DFun_args_next', 'DFun_arg_name', 'DFun_arg_type',
-            'DFun_body_first', 'DFun_body_next', 
-            'DVar_expr', 'DVar_name', 'DVar_type', 
-            # types
-            'TyMapping_dst', 'TyArray_elem',
-            # contract
-            'DFun_first', 'DFun_next',
-            # special
-            'contents'])
+
+        self.reserved_vertex_token_list = sorted(StoVarGraph.VERTEX_TOKENS)
+        self.reserved_edge_token_list = sorted(StoVarGraph.EDGE_TOKENS)
+        # self.reserved_vertex_token_list = sorted(soltype_vertex_tokens)
+        # self.reserved_edge_token_list = sorted(soltype_edge_tokens)
+        
         # extend the edge token with reversed version
         tmp_reversed_edge_token_list = ["REV_{}".format(p) for p in self.reserved_edge_token_list]
         self.reserved_edge_token_list = sorted( self.reserved_edge_token_list+tmp_reversed_edge_token_list )
@@ -110,7 +77,7 @@ class InvariantEnvironment(gym.Env):
     
         # fixme: here we setup all contracts first to prevent contract id not found error in non local mode of RLlib
         for i, c in enumerate(config["contracts"]):
-            print("Initializing contract", c)
+            print("Initializing contract", c[0], c[1])
             self.setup(config, arg_id=i)
 
 
@@ -167,15 +134,8 @@ class InvariantEnvironment(gym.Env):
             self.flex_action_list = cached["flex_action_list"]
             self.flex_action_dict = cached["flex_action_dict"]
             
-            self.contract_path = cached["contract_path"]
-            self.solc_version = cached["solc_version"]
-            self.contract_json = cached["contract_json"]
-            self.contract_slim_ast = cached["contract_slim_ast"]
-            self.contract_e2n = cached["contract_e2n"]
-            self.contract_e2r = cached["contract_e2r"]
-            self.contract_igraph = cached["contract_igraph"]
-            self.contract_root_id = cached["contract_root_id"]
-            self.contract_encoded_igraph = cached["contract_encoded_igraph"]
+            self.contract = cached["contract"]
+            self.var_to_vertex = cached["var_to_vertex"]
             self.contract_observed = cached["contract_observed"]
             self.stovar_list = cached["stovar_list"]
             self.stovar_dict = cached["stovar_dict"]
@@ -185,6 +145,7 @@ class InvariantEnvironment(gym.Env):
             self.action_masks = cached["action_masks"]
             self.shadow_actions = cached["shadow_actions"]
             self.inv_cache = cached["inv_cache"]
+            self.svg = cached["svg"]
         else:
             # need to start a new process
             self.private_tspec = copy.deepcopy(self.tspec)
@@ -197,8 +158,8 @@ class InvariantEnvironment(gym.Env):
                 self.action_list,
             ))
             # hack
-            self.fixed_action_list[-2].set_lhs_sort(sort.INT) # second to last fixed action is EnumType -> 0
-            self.fixed_action_list[-1].set_lhs_sort(sort.BOOL) # last fixed action is EnumType -> true
+            # self.fixed_action_list[-2].set_lhs_sort(sort.BOOL) # second to last fixed action is EnumType -> true
+            self.fixed_action_list[-1].set_lhs_sort(sort.INT) # last  fixed action is EnumType -> 0
             
             self.fixed_action_dict = {self.fixed_action_list[i]:i for i in range(len(self.fixed_action_list))}
             # a flex action is bounded with a stovar dynamically for different benchmarks
@@ -212,35 +173,33 @@ class InvariantEnvironment(gym.Env):
             self.action_dict = {self.action_list[i]:i for i in range(len(self.action_list))}
             # note: see notes in `observe_action_seq`
             assert self.action_list[0].name == "empty", "Need `empty` as the first production rule in DSL."
-            self.contract_path = arg_config["contracts"][self.curr_contract_id][0]
-            self.solc_version = arg_config["contracts"][self.curr_contract_id][1]
+            contract_path, solc_version, svg_str = arg_config["contracts"][self.curr_contract_id]
+            # contract_path, solc_version, *svg_str = arg_config["contracts"][self.curr_contract_id]
+            self.contract = Contract(contract_path, solc_version)
 
             # ================ #
             # contract related #
             # ================ #
-            # tokenize the target contract
-            self.contract_json = self.get_contract_ast(self.contract_path, self.solc_version)
             
-            # e2n: variable name -> node id
+            self.svg = StoVarGraph(self.contract, svg_str)
+            # tokenize the target contract
+            self.solid.use_solc_version(self.contract.version)
+            self.contract_json = self.solid.contract_json(self.contract)
+            
+            # var_to_vertex: variable name -> node id
             #      e.g., {'_balances': 0, '_totalSupply': 4, 'account': 5, 'value': 6}
-            # e2r: variable name -> list of node ids that refer to this variable, e.g., 
-            #      {'account': [13, 37, 42],
-            #       '_totalSupply': [22, 24, 28, 31],
-            #       'value': [23, 32, 43],
-            #       '_balances': [36, 41]}
             # - an variable name is NOT always a stovar
-            # - an identifier is NOT always a variable (it could also be some reserved one like "require")
-            self.contract_slim_ast, vs, es, var_v = get_soltype_ast(self.contract_json)
-            self.contract_e2n, self.contract_e2r, self.contract_igraph, self.contract_root_id = soltype_ast_to_igraph(self.contract_slim_ast, vs, es, var_v)
+
+            # self.var_to_vertex, ig = get_soltype_graph(self.contract_json)
+            self.var_to_vertex, ig = self.svg.get_igraph(self.contract_json)
             # note: add reversed edges
-            self.contract_igraph = add_reversed_edges(self.contract_igraph)
+            ig = add_reversed_edges(ig)
             # note: adding an extra padding node
-            self.contract_igraph, self.contract_e2n, self.contract_e2r, self.contract_root_id = insert_padding_node(
-                self.contract_igraph, self.contract_e2n, self.contract_e2r, self.contract_root_id
-            )
-            # self.contract_networkx = igraph.Graph.to_networkx(self.contract_igraph)
+            ig, self.var_to_vertex = insert_padding_node(ig, self.var_to_vertex)
+
+            # self.contract_networkx = igraph.Graph.to_networkx(ig)
             # map tokens to corresponding ids (no variable will show up since the graph is already anonymous)
-            self.contract_encoded_igraph = self.contract_igraph.copy()
+            self.contract_encoded_igraph = ig.copy()
             for p in self.contract_encoded_igraph.vs:
                 try:
                     p["token"] = self.token_dict[p["token"]]
@@ -259,7 +218,7 @@ class InvariantEnvironment(gym.Env):
             }
 
             # get stovars list
-            self.stovar_list, self.stovar_sorts = zip(*self.get_contract_stovars(self.contract_path))
+            self.stovar_list, self.stovar_sorts = self.solid.storage_variables(self.contract)
             self.stovar_dict = {self.stovar_list[i]:i for i in range(len(self.stovar_list))}
             # check for enough var production rules in the dsl
             enum_expr = self.private_tspec.get_type("EnumExpr", sort.ANY)
@@ -288,13 +247,13 @@ class InvariantEnvironment(gym.Env):
 
             # generate the baseline score (i.e., score for the "true" invariant)
             # a tuple of ( hard, tot_hard, soft, tot_soft )
-            self.contract_baseline_scores = self.check(self.contract_path, "true", arg_silent_mode=True)
+            self.contract_baseline_scores = self.check(self.contract, "true", arg_silent_mode=True)
             # note: do you need to assert the inferiority of the scores of baseline?
 
             print("# ======")
-            print("# contract: {}\n# e2n: {}\n# e2r: {}\n# root: {}\n# num_nodes: {}\n# num_edges: {}\n# baseline scores: {}".format(
-                self.contract_path, self.contract_e2n, self.contract_e2r, self.contract_root_id,
-                len(self.contract_igraph.vs), len(self.contract_igraph.es),
+            print("# contract: {}\n# var_to_vertex: {}\n# num_nodes: {}\n# num_edges: {}\n# baseline scores: {}".format(
+                self.contract.path, self.var_to_vertex,
+                len(ig.vs), len(ig.es),
                 self.contract_baseline_scores
             ))
             print("# start type:", self.start_type)
@@ -317,16 +276,9 @@ class InvariantEnvironment(gym.Env):
             cached["flex_action_list"] = self.flex_action_list
             cached["flex_action_dict"] = self.flex_action_dict
 
-            cached["contract_path"] = self.contract_path
-            cached["solc_version"] = self.solc_version
-            cached["contract_json"] = self.contract_json
-            cached["contract_slim_ast"] = self.contract_slim_ast
-            cached["contract_e2n"] = self.contract_e2n
-            cached["contract_e2r"] = self.contract_e2r
-            cached["contract_igraph"] = self.contract_igraph
-            cached["contract_root_id"] = self.contract_root_id
-            cached["contract_encoded_igraph"] = self.contract_encoded_igraph
+            cached["contract"] = self.contract
             cached["contract_observed"] = self.contract_observed
+            cached["var_to_vertex"] = self.var_to_vertex
             cached["stovar_list"] = self.stovar_list
             cached["stovar_dict"] = self.stovar_dict
             cached["flex_action_to_stovar"] = self.flex_action_to_stovar
@@ -335,7 +287,7 @@ class InvariantEnvironment(gym.Env):
             cached["action_masks"] = self.action_masks
             cached["shadow_actions"] = self.shadow_actions
             cached["inv_cache"] = self.inv_cache
-            
+            cached["svg"] = self.svg
             # self.print_cached_action_masks()
 
         # ====== #
@@ -362,7 +314,7 @@ class InvariantEnvironment(gym.Env):
                 # flex action
                 if self.action_list[p] in self.flex_action_to_stovar.keys():
                     ret_seq_token.append(self.token_dict["<PAD>"])
-                    ret_seq_node.append(self.contract_e2n[self.flex_action_to_stovar[self.action_list[p]]])
+                    ret_seq_node.append(self.var_to_vertex[self.flex_action_to_stovar[self.action_list[p]]])
                 else:
                     # this action does not have corresponding stovar (the prod is not useful), use padding instead
                     ret_seq_token.append(self.token_dict["<PAD>"])
@@ -398,52 +350,6 @@ class InvariantEnvironment(gym.Env):
         if tup_seq not in InvariantEnvironment.sampled_action_seqs[self.curr_contract_id].keys():
             InvariantEnvironment.sampled_action_seqs[self.curr_contract_id][tup_seq] = 0
         InvariantEnvironment.sampled_action_seqs[self.curr_contract_id][tup_seq] += 1
-
-    def get_contract_ast(self, arg_path, arg_solc_version):
-        cmd_set = subprocess.run("solc-select use {}".format(arg_solc_version), shell=True, capture_output=True)
-        if cmd_set.returncode != 0:
-            raise Exception("Error executing solc-select. Check your environment configuration.")
-
-        # Use SolType AST
-        cmd = f"liquidsol-exe {arg_path} --task ast --only-last"
-        cmd_ast = subprocess.run(cmd, shell=True, capture_output=True)
-        if cmd_ast.returncode != 0:
-            raise Exception(f"Error executing {cmd}. Check your environment configuration.")
-        remove_first_line = lambda s: '\n'.join(s.split('\n')[1:])
-        raw_output = cmd_ast.stdout.decode("utf-8")
-        raw_json = remove_first_line(raw_output)
-
-        parsed_json = json.loads(raw_json)
-        return parsed_json
-
-    def get_contract_stovars(self, arg_path):
-        cmd_sto = subprocess.run("liquidsol-exe {} --task vars --only-last".format(arg_path), shell=True, capture_output=True)
-        assert(cmd_sto.returncode == 0)
-        raw_output = cmd_sto.stdout.decode("utf-8")
-        lines = raw_output.rstrip().split("\n")
-        # split different classes
-        break_points = []
-        for i in range(len(lines)):
-            if lines[i].startswith("Now running"):
-                break_points.append(i)
-        break_points.append(len(lines))
-        # process every block
-        tmp_list = []
-        for j in range(len(break_points)-1):
-            curr_lines = lines[break_points[j]+1:break_points[j+1]]
-            assert(len(curr_lines) % 2 == 0)
-            names = curr_lines[:len(curr_lines)//2]
-            sorts = curr_lines[len(curr_lines)//2:]
-            for k in range(len(names)):
-                try:
-                    s = sort.parse(sorts[k])
-                    tmp_list.append((names[k], s))
-                except:
-                    pass
-        # fixme: remove duplicate, this is not super appropriate
-        tmp_list = list(set(tmp_list))
-        # print("# number of stovars: {}, stovars are: {}".format(len(tmp_list), tmp_list))
-        return tmp_list
     
     def compute_action_masks(self):
         # print(f"compute_action_masks for contract {self.curr_contract_id}")
@@ -506,8 +412,8 @@ class InvariantEnvironment(gym.Env):
                     a = self.action_list[i].name
                 elif i >= len(self.fixed_action_list):
                     a = self.stovar_list[i-len(self.fixed_action_list)]
-                elif i == len(self.fixed_action_list) - 1:
-                    a = "true"
+                # elif i == len(self.fixed_action_list) - 1:
+                #     a = "true"
                 else:
                     a = "0"
                 valid_actions.append(a)
@@ -544,7 +450,6 @@ class InvariantEnvironment(gym.Env):
                     p0._lhs = p0.lhs.subst(sigma)
                     p0._rhs = [t.subst(sigma) if isinstance(t, S.type.Type) else t for t in p0.rhs]
                     shadow_ps[p][s] = p0
-                    # print("shadow: {} / {} -> {}".format(p, s, p0))
         return shadow_ps
 
 
@@ -583,32 +488,23 @@ class InvariantEnvironment(gym.Env):
             "all_actions@node_channel": self.pad_to_length(tmp_all_actions_node, self.max_step),
         }
 
-    def check(self, arg_contract_path: str, arg_verifier_inv: str, arg_silent_mode: bool=False):
+    def check(self, arg_contract: Contract, arg_verifier_inv: str, arg_silent_mode: bool=False):
         if arg_verifier_inv in self.inv_cache:
             result = self.inv_cache[arg_verifier_inv]
         else:
-            ret = subprocess.run(
-                "liquidsol-exe {} --task check --check-inv '{}' --only-last".format(arg_contract_path, arg_verifier_inv),
-                shell=True, capture_output=True,
-            )
-            if ret.returncode != 0:
-                return None
-            ret = ret.stdout.decode("utf-8")
-            hard_ok, hard = re.search("Hard: ([0-9]+) / ([0-9]+)", ret).groups()
-            soft_ok, soft = re.search("Soft: ([0-9]+) / ([0-9]+)", ret).groups()
-            result = list(map(int, [hard_ok, hard, soft_ok, soft]))
+            result = self.solid.check(arg_contract, arg_verifier_inv)
+        hard_ok, hard, soft_ok, soft = result
         if not arg_silent_mode:
             # print()
             print("# [debug][verifier-result] ----------> hard: {:d}/{:d} ({:+d}), soft: {:d}/{:d} ({:+d}) <----------".format(
-                result[0], result[1], result[0] - self.contract_baseline_scores[0],
-                result[2], result[3], result[2] - self.contract_baseline_scores[2],
+                hard_ok, hard, hard_ok - self.contract_baseline_scores[0],
+                soft_ok, soft, soft_ok - self.contract_baseline_scores[2],
             ))
-            # print()
-        if result[0]+result[2]==result[1]+result[3]:
+        if hard_ok + soft_ok == hard + soft:
             # input("Found the ground truth!")
             pass
         self.inv_cache[arg_verifier_inv] = result
-        return result
+        return list(result)
 
     # the action id here is for the action_list / action space for sure    
     def step(self, arg_action_id: int):
@@ -714,7 +610,7 @@ class InvariantEnvironment(gym.Env):
                     self.curr_action_seq, self.trinity_inv_to_debugging_inv(self.curr_trinity_inv),
                 ))
                 tmp_verifier_inv = self.trinity_inv_to_verifier_inv(self.curr_trinity_inv)
-                tmp_reslist = self.check(self.contract_path, tmp_verifier_inv)
+                tmp_reslist = self.check(self.contract, tmp_verifier_inv)
                 tmp_action_mask = [0 for _ in range(len(self.action_list))]
                 tmp_terminate = True
                 if tmp_reslist is None:

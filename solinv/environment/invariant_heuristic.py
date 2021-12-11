@@ -3,7 +3,7 @@ from ..tyrell.spec import FunctionProduction
 
 class InvariantHeuristic():
     '''
-    Provides a set of invariant heuristic checkings.
+    Provides a set of invariant heuristic checks.
     Returns True if the given heuristic is good to go, False if not.
     '''
 

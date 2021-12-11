@@ -1,6 +1,49 @@
 from copy import deepcopy
 import igraph as ig
 
+soltype_vertex_tokens = [
+            '<CONTRACT>',
+            # expressions
+            '<VAR>',
+            'CInt', 'CBool', 'CArrZero',
+            "Unary_not", "!=", ">=", "<=", ">", "<", "==", "||", "&&", 
+            "+", "-",  "*", "/", "%", "**",
+            "+=", "-=", "*=", "/=",
+            'EMapInd', 'EField', 'EHavoc',
+            # lvalues
+            'LvInd', 'LvFld',
+            # statements
+            'SAsn', 'SCall', 'SDecl', 'SIf', 'SReturn', 'SWhile', 'SHavoc', 'SAbort',
+            # declarations
+            'DCtor',
+            'DFun', 'DFun_arg',
+            'DStruct',
+            # types
+            'TyMapping', 'TyStruct', 'TyArray', 'TyAddress', 'TyInt', 'TyInt32', 'TyInt64', 'TyInt120', 'TyInt256', 'TyBool', 'TyByte']
+
+soltype_edge_tokens = [
+            # expressions
+            'Var_name', 'Unary_e', 'Binary_lhs', 'Binary_rhs', 
+            'EField_fld', 'EField_struct', 'EMapInd_ind', 'EMapInd_map', 
+            # lvalues
+            'LvFld_fld', 'LvFld_struct', 'LvInd_ind', 'LvInd_map', 
+            # statements
+            'SAsn_lhs', 'SAsn_rhs', 'SCall_args', 'SCall_args_first', 'SCall_args_next', 'SCall_name', 
+            'SIf_cond', 'SIf_else', 'SIf_then', 'SIf_then_first', 'SIf_then_next', 'SIf_else_first', 'SIf_else_next',
+            'SWhile_cond', 'SWhile_body_first', 'SWhile_body_next',
+            # declarations
+            'DCtor_args', 'DCtor_body', 
+            'DFun_args', 'DFun_body', 'DFun_name',
+            'DFun_args_first', 'DFun_args_next', 'DFun_arg_name', 'DFun_arg_type',
+            'DFun_body_first', 'DFun_body_next', 
+            'DVar_expr', 'DVar_name', 'DVar_type', 
+            # types
+            'TyMapping_dst', 'TyArray_elem',
+            # contract
+            'DFun_first', 'DFun_next',
+            # special
+            'contents']
+
 def add_reversed_edges(arg_igraph):
     """Inserts reversed edges by exchanging the source and target and marking the edge label as REV_???"""
     # first export nodes as records
@@ -22,7 +65,7 @@ def add_reversed_edges(arg_igraph):
         edge_attrs={"token": edge_attributes+ext_edge_attributes},
     )
 
-def insert_padding_node(arg_igraph, arg_e2n, arg_e2r, arg_root_id, arg_padding_token="<PAD>"):
+def insert_padding_node(arg_igraph, arg_var_to_vertex, arg_padding_token="<PAD>"):
     """Inserts an extra node at the very beginning (index=0) with padding token as label"""
     # assertions come first
     for i in range(len(arg_igraph.vs)):
@@ -49,13 +92,12 @@ def insert_padding_node(arg_igraph, arg_e2n, arg_e2r, arg_root_id, arg_padding_t
     )
 
     # process/shift the remaining components
-    new_e2n = { dkey:arg_e2n[dkey]+1 for dkey in arg_e2n.keys() }
-    new_e2r = {
-        [ arg_e2r[dkey][i]+1 for i in range(len(arg_e2r[dkey])) ]
-        for dkey in arg_e2r.keys()
-    }
-    new_root_id = arg_root_id + 1
-    return new_igraph, new_e2n, new_e2r, new_root_id
+    new_var_to_vertex = { dkey:arg_var_to_vertex[dkey]+1 for dkey in arg_var_to_vertex.keys() }
+    # new_e2r = {
+    #     [ arg_e2r[dkey][i]+1 for i in range(len(arg_e2r[dkey])) ]
+    #     for dkey in arg_e2r.keys()
+    # }
+    return new_igraph, new_var_to_vertex
 
 def extract_tokens(d, f):
     """Extract tokens from an JSON AST, using extraction function f"""
@@ -160,7 +202,7 @@ def label_edges(ast, ei, edges, var_v):
 
     return inner(ast)
 
-def get_soltype_ast(contract_json):
+def get_soltype_graph(contract_json):
     contract_name, contents = contract_json
     find = lambda l, tag: [x for x in l if type(x) == dict and x["tag"] == tag]
     # constructors
@@ -210,9 +252,7 @@ def get_soltype_ast(contract_json):
     edges = list()
     contract4 = label_edges(deepcopy(contract3), 0, edges, var_v)
 
-    return contract4, vertices, edges, var_v
-
-def soltype_ast_to_igraph(contract_ast, vs, es, var_v):
+    contract_ast, vs, es = contract4, vertices, edges
     g = ig.Graph(
         directed=True,
         n=len(vs),
@@ -223,6 +263,4 @@ def soltype_ast_to_igraph(contract_ast, vs, es, var_v):
 
     g.delete_vertices([v for v in g.vs if v.degree() == 0])
 
-    root_id = contract_ast["vertex_id"]
-
-    return var_v, {}, g, root_id
+    return var_v, g
