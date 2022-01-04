@@ -190,6 +190,7 @@ class TestNN(TorchModelV2, nn.Module):
             torch.log(input_dict["obs"]["action_mask"]), 
             torch.tensor(torch.finfo(torch.float32).min) 
         )
+        print(tmp2_out + inf_mask)
 
         # note-important: should return state as [] because LSTM is not used between states, 
         #                 but just to encode one state, which makes the whole model behave normal

@@ -1,6 +1,9 @@
 import subprocess
 import json
 import re
+
+from lark.exceptions import *
+
 from .contract import Contract
 from ..tyrell.spec import sort
 
@@ -40,33 +43,32 @@ class Solid:
   
   def storage_variables(self, contract: Contract):
     """Get the list of storage variables as well as a list of their sorts"""
-    cmd = f"liquidsol-exe {contract.path} --task vars --only-last"
+    cmd = f"liquidsol-exe {contract.path} --only-last --task vars"
     ret = subprocess.run(cmd, shell=True, capture_output=True)
     if ret.returncode != 0:
-      raise Exception(f"Error executing {cmd}. Check your environment configuration.")
+      raise Exception(f"Error executing {cmd}. Check your environment configuration.\n{ret.stderr.decode('utf-8')}")
     raw_output = ret.stdout.decode("utf-8")
-    lines = raw_output.rstrip().split("\n")
+    lines = raw_output.rstrip().split("\n")[1:] # first line is "Now running on ..."
+    variables, sorts = [], []
     # split different classes
-    break_points = [i for i, line in enumerate(lines) if line.startswith("Now running")]
-    break_points.append(len(lines))
-    # process every block
-    variables = []
-    sorts = []
-    for (bp0, bp1) in zip(break_points, break_points[1:]):
-      curr_lines = lines[bp0+1 : bp1]
-      print(curr_lines)
-      assert(len(curr_lines) % 2 == 0)
-      names = curr_lines[:len(curr_lines)//2]
-      sorts_str = curr_lines[len(curr_lines)//2:]
-      for k in range(len(names)):
-        try:
-          s = sort.parse(sorts_str[k])
-          variables.append(names[k])
-          sorts.append(s)
-        except:
-          # print("Warning: unable to parse sort {}".format(sorts[k]))
-          raise Exception("unable to parse sort {}".format(sorts_str[k]))
+    for line in lines:
+      name_str, sort_str = line.strip().split(" : ")
+      try:
+        s = sort.parse(sort_str)
+        variables.append(name_str)
+        sorts.append(s)
+      except: # fixme: more precise exception matching
+        # raise Exception("Unable to parse sort {}".format(sort_str))
+        print(f"Warning: Unable to parse sort {sort_str}. Discard variable {name_str}")
     # fixme: remove duplicate, this is not super appropriate
     # tmp_list = list(set(tmp_list))
-    print("# number of stovars: {}, stovars are: {}, sorts: {}".format(len(variables), variables, sorts))
+    # print("# number of stovars: {}, stovars are: {}, sorts: {}".format(len(variables), variables, sorts))
     return variables, sorts
+  
+  def flow(self, contract: Contract):
+    """Get the JSON of storage-variable graph"""
+    cmd = f"liquidsol-exe {contract.path} --only-last --task flow"
+    ret = subprocess.run(cmd, shell=True, capture_output=True)
+    if ret.returncode != 0:
+      raise Exception(f"Error executing {cmd}. Check your environment configuration.\n{ret.stderr.decode('utf-8')}")
+    return json.loads(ret.stdout.decode("utf-8").split("\n")[1]) # first line is "Now running on ..."

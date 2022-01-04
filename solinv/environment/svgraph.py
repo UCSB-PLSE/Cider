@@ -1,75 +1,52 @@
-import igraph as ig
 import subprocess
-from .contract import Contract
+import json
+import igraph as ig
 
-class StoVarGraph:
+class SVGraph:
   TOKEN_LOCAL = "<LOCAL>"
-  TOKEN_VAR = "<VAR>"
-  TOKEN_FUNC = "<FUNC>"
-  VERTEX_TOKENS = [TOKEN_LOCAL, TOKEN_VAR]
-  EDGE_TOKENS = [TOKEN_FUNC]
+  TOKEN_SV = "<SV>" # storage var
+  TOKEN_EDGE_FLOW = "<FLOW>"
+  TOKEN_EDGE_FLOW_INC = "<FLOW_INC>"
+  TOKEN_EDGE_FLOW_DEC = "<FLOW_DEC>"
+  VERTEX_TOKENS = [TOKEN_LOCAL, TOKEN_SV]
+  EDGE_TOKENS = [TOKEN_EDGE_FLOW, TOKEN_EDGE_FLOW_INC, TOKEN_EDGE_FLOW_DEC]
 
-  def node(self, name):
-    return [v for i,v in enumerate(self.g.vs) if v['name'] == name][0]
-  def ind(self, name):
-    return [i for i,v in enumerate(self.g.vs) if v['name'] == name][0]
-
-  def __init__(self, contract: Contract, flow_edges_str):
-    # print(self.contract_path)
-    subprocess.run(f"solc-select use {contract.version}", shell=True, capture_output=True)
-    out = subprocess.run(f"liquidsol-exe {contract.path} --only-last --task vars", capture_output=True, check=True, shell=True).stdout.decode('utf-8')
-    ss = out.split("\n")[1:]
-    self.sto_vars = set(ss[:len(ss)//2])
-    self.flow_edges, flow_vars = self.parse_flow_edges(flow_edges_str)
-    self.vars = list(self.sto_vars | flow_vars)
-    # print(self.vars)
-    self.g = ig.Graph(directed=True)
-    self.g.add_vertices(len(self.vars))
-    for i, v in enumerate(self.g.vs):
-      n = self.vars[i]
-      v['name'] = n
-      if StoVarGraph.is_local(n):
-        self.node(n)['token'] = StoVarGraph.TOKEN_LOCAL
-      else:
-        assert n in self.sto_vars, f"{n} is not a storage variable"
-        self.node(n)['token'] = StoVarGraph.TOKEN_VAR
-
-
-    def add(n1, n2, fn):
-      """Add an edge between the node named n1 and the node named n2 due to function fn"""
-      self.g.add_edge(self.ind(n1), self.ind(n2))
-      
-      if fn is not None:
-        e = [e for e in self.g.es if e.tuple == (self.ind(n1), self.ind(n2))][0]
-        e["name"] = fn
-        e["token"] = StoVarGraph.TOKEN_FUNC
-    
-    for n1, n2, fn in self.flow_edges:
-      add(n1, n2, fn)
+  kind_to_token = {'Flow': TOKEN_EDGE_FLOW, 'FlowInc': TOKEN_EDGE_FLOW_INC, 'FlowDec': TOKEN_EDGE_FLOW_DEC}
   
-  @staticmethod
-  def is_local(n):
-    return "$" in n
-
-  def parse_flow_edges(self, flow_edges_str):
-    fn = None
-    flow_edges = []
-    flow_vars = set()
-    for i, l in enumerate(filter(lambda s: s != '', flow_edges_str.split('\n'))):
-      l = l.strip()
-      if l == '': continue
-      if l[-1] == ":":
-        fn = l.rstrip(":")
+  def __init__(self, solid, contract):
+    flow = solid.flow(contract)
+    sv, _ = solid.storage_variables(contract)
+    sv_set = set(sv)
+    var_set = sv_set | set([v for fn in flow for edge in fn['edges'] for v in [edge['src'], edge['dst']]])
+    local_set = var_set - sv_set
+    # sort variables first by local/non-local, then by alphabet
+    var_list = sorted(sorted(list(var_set)), key=lambda v: v not in sv_set)
+    var_dict = {v: i for i, v in enumerate(var_list)}
+    g = ig.Graph(directed=True)
+    g.add_vertices(len(var_list))
+    for i, v in enumerate(g.vs):
+      var = var_list[i]
+      v['name'] = var
+      if var in sv_set:
+        v['token'] = SVGraph.TOKEN_SV
       else:
-        src, dst = l.split(", ")
-        src = fn + src if StoVarGraph.is_local(src) else src
-        dst = fn + dst if StoVarGraph.is_local(dst) else dst
-        flow_edges.append((src, dst, fn))
-        flow_vars.add(src)
-        flow_vars.add(dst)
-    return flow_edges, flow_vars
-
+        v['token'] = SVGraph.TOKEN_LOCAL
+    for fn in flow:
+      sv_used = sv_set & set([v for edge in fn['edges'] for v in [edge['src'], edge['dst']]])
+      if len(sv_used) < 2: continue
+      for edge in fn['edges']:
+        kind = edge['kind']
+        src = edge['src']
+        dst = edge['dst']
+        edge_token = SVGraph.kind_to_token[kind]
+        src_i, dst_i = var_dict[src], var_dict[dst]
+        if (src_i, dst_i) not in g.es:
+          e = g.add_edge(src_i, dst_i)
+          e['token'] = edge_token
+          fn_name = fn['name'] or '<ctor>'
+          e['name'] = fn_name
+    self.g = g
+    self.var_to_v = {v: i for v, i in var_dict.items() if v in sv_set}
+  
   def get_igraph(self, contract_json):
-    var_to_vertex = {v['name']: i for i, v in enumerate(self.g.vs)}
-    return var_to_vertex, self.g
-
+    return self.var_to_v, self.g

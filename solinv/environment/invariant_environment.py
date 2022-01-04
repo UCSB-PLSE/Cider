@@ -24,12 +24,15 @@ from .error import EnvironmentError
 from .soltype_ast import get_soltype_graph, insert_padding_node, add_reversed_edges, soltype_edge_tokens, soltype_vertex_tokens
 
 from ..tyrell.spec import sort
-from .svgraph import StoVarGraph
+from .svgraph import SVGraph
 from .solid import Solid
 from .contract import Contract
 
 def nonzero(xs):
     return [i for i, x in enumerate(xs) if x != 0]
+
+class InvariantEnvironmentException(Exception):
+    pass
 
 class InvariantEnvironment(gym.Env):
     # note: class static variable
@@ -40,7 +43,7 @@ class InvariantEnvironment(gym.Env):
     CONTRACT_MAX_IDS   = 100
     CONTRACT_MAX_NODES = 1000
 
-    def __init__(self, config: Dict[str, Any], is_test=False):
+    def __init__(self, config: Dict[str, Any], is_test=False, use_svg=True):
         self.config = config
         self.tspec = config["spec"]
         self.builder = D.Builder(self.tspec)
@@ -57,10 +60,13 @@ class InvariantEnvironment(gym.Env):
         self.special_token_list = ["<PAD>", "<ID>", "<REF>"]
         self.reserved_identifier_token_list = [] # TODO: populate this
 
-        self.reserved_vertex_token_list = sorted(StoVarGraph.VERTEX_TOKENS)
-        self.reserved_edge_token_list = sorted(StoVarGraph.EDGE_TOKENS)
-        # self.reserved_vertex_token_list = sorted(soltype_vertex_tokens)
-        # self.reserved_edge_token_list = sorted(soltype_edge_tokens)
+        self.use_svg = use_svg
+        if use_svg:
+            self.reserved_vertex_token_list = sorted(SVGraph.VERTEX_TOKENS)
+            self.reserved_edge_token_list = sorted(SVGraph.EDGE_TOKENS)
+        else:
+            self.reserved_vertex_token_list = sorted(soltype_vertex_tokens)
+            self.reserved_edge_token_list = sorted(soltype_edge_tokens)
         
         # extend the edge token with reversed version
         tmp_reversed_edge_token_list = ["REV_{}".format(p) for p in self.reserved_edge_token_list]
@@ -173,15 +179,23 @@ class InvariantEnvironment(gym.Env):
             self.action_dict = {self.action_list[i]:i for i in range(len(self.action_list))}
             # note: see notes in `observe_action_seq`
             assert self.action_list[0].name == "empty", "Need `empty` as the first production rule in DSL."
-            contract_path, solc_version, svg_str = arg_config["contracts"][self.curr_contract_id]
-            # contract_path, solc_version, *svg_str = arg_config["contracts"][self.curr_contract_id]
+            # contract_path, solc_version, svg_str = arg_config["contracts"][self.curr_contract_id]
+            contract_path, solc_version, *svg_str = arg_config["contracts"][self.curr_contract_id]
             self.contract = Contract(contract_path, solc_version)
 
             # ================ #
             # contract related #
             # ================ #
             
-            self.svg = StoVarGraph(self.contract, svg_str)
+            # get stovars list
+            self.stovar_list, self.stovar_sorts = self.solid.storage_variables(self.contract)
+            if len(self.stovar_list) == 0:
+                raise InvariantEnvironmentException
+            self.stovar_dict = {self.stovar_list[i]:i for i in range(len(self.stovar_list))}
+
+            self.svg = SVGraph(self.solid, self.contract)
+            if len(self.svg.g.es) == 0:
+                raise InvariantEnvironmentException
             # tokenize the target contract
             self.solid.use_solc_version(self.contract.version)
             self.contract_json = self.solid.contract_json(self.contract)
@@ -190,8 +204,11 @@ class InvariantEnvironment(gym.Env):
             #      e.g., {'_balances': 0, '_totalSupply': 4, 'account': 5, 'value': 6}
             # - an variable name is NOT always a stovar
 
-            # self.var_to_vertex, ig = get_soltype_graph(self.contract_json)
-            self.var_to_vertex, ig = self.svg.get_igraph(self.contract_json)
+            if self.use_svg:
+                self.var_to_vertex, ig = self.svg.get_igraph(self.contract_json)
+            else:
+                self.var_to_vertex, ig = get_soltype_graph(self.contract_json)
+            print(self.var_to_vertex)
             # note: add reversed edges
             ig = add_reversed_edges(ig)
             # note: adding an extra padding node
@@ -217,9 +234,7 @@ class InvariantEnvironment(gym.Env):
                 ]).long()
             }
 
-            # get stovars list
-            self.stovar_list, self.stovar_sorts = self.solid.storage_variables(self.contract)
-            self.stovar_dict = {self.stovar_list[i]:i for i in range(len(self.stovar_list))}
+            
             # check for enough var production rules in the dsl
             enum_expr = self.private_tspec.get_type("EnumExpr", sort.ANY)
             for i in range(len(self.stovar_list)):
@@ -261,6 +276,7 @@ class InvariantEnvironment(gym.Env):
             print("# action masks:")
             # for t, mask in self.action_masks.items():
             #     print(t, nonzero(mask))
+            self.print_productions()
             self.print_action_masks(self.action_masks)
             print("# ======")
 
@@ -306,7 +322,7 @@ class InvariantEnvironment(gym.Env):
         #       we also abuse a bit here that the following three tokens all have "padding" functionalities with id 0:
         #       - `empty` production rule
         #       - <PAD> in token
-        #       - a pddding node with <PAD> label 
+        #       - a padding node with <PAD> label 
         #         (a padding node should always have <PAD> label, but a node with <PAD> is not always a padding node)
         ret_seq_token, ret_seq_node = [], []
         for p in arg_action_seq:
@@ -330,7 +346,7 @@ class InvariantEnvironment(gym.Env):
 
     def trinity_inv_to_debugging_inv(self, arg_trinity_inv):
         # debugging inv still retains the recursive trinity structure
-        # this will replace all replacable <VAR?> with binded stovar
+        # this will replace all replacable <VAR?> with bound stovar
         tmp_inv = str(arg_trinity_inv)
         for prod in self.flex_action_to_stovar.keys():
             tmp_inv = tmp_inv.replace(prod._get_rhs(), self.flex_action_to_stovar[prod])
@@ -402,6 +418,18 @@ class InvariantEnvironment(gym.Env):
             masks[t] = mask
             # print(t, nonzero(mask))
         return masks
+    
+    def print_productions(self):
+        for i in range(len(self.fixed_action_list + self.stovar_list)):
+            if isinstance(self.action_list[i], S.production.FunctionProduction):
+                a = self.action_list[i].name
+            elif i >= len(self.fixed_action_list):
+                a = self.stovar_list[i-len(self.fixed_action_list)]
+            # elif i == len(self.fixed_action_list) - 1:
+            #     a = "true"
+            else:
+                a = "0"
+            print(i, a)
 
     def print_action_masks(self, masks):
         for t, mask in masks.items():
